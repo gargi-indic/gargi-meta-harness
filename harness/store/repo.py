@@ -64,10 +64,27 @@ def _parse_json_col(val: str | None, default: Any = None) -> Any:
     return json.loads(val)
 
 
+def get_repo(store: Store, full_name: str) -> dict[str, Any] | None:
+    rows = store.query("SELECT * FROM repos WHERE full_name = ?", (full_name,))
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "full_name": r["full_name"],
+        "default_branch": r["default_branch"],
+        "config": _parse_json_col(r["config_json"], {}),
+        "synced_at": r["synced_at"],
+    }
+
+
 def upsert_repo(
-    store: Store, full_name: str, default_branch: str | None, config: dict[str, Any] | None
+    store: Store,
+    full_name: str,
+    default_branch: str | None,
+    config: dict[str, Any] | None,
+    synced_at: str | None = None,
 ) -> None:
-    now = store.now()
+    now = synced_at or store.now()
     config_json = json.dumps(config) if config is not None else None
 
     store.execute(
