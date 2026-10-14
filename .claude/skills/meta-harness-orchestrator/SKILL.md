@@ -34,6 +34,7 @@ Run these from the repo root after `source ~/.config/jules/env`. `jules.py` targ
 | `... activities <session> [n]` | Plans, messages, progress, changeSets (no command output; ask Jules to paste it) |
 | `... approve <session>` | Approve the pending plan |
 | `... message <session> "$(cat file)"` | Plan corrections, answers, PR fix requests. Write long text to a scratchpad file first. |
+| `... archive <session>` | Archive a finished or abandoned session. **Always archive after merging or handing a task to Sonnet**: open sessions use up Jules's concurrency limit, and new sessions then sit `PAUSED`. Abandoned sessions can also come back to life (the #7 session went FAILED, then IN_PROGRESS). |
 | `... wait <session> [secs]` | Block until the session needs attention or finishes |
 | `... wait-reply <session> [secs]` | After `message`: block until Jules replies with a message or plan |
 | `... wait-push <session> <pr> [secs]` | After requesting PR fixes: block until the PR head changes and Jules is idle |

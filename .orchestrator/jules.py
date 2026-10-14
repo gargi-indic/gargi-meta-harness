@@ -10,6 +10,7 @@ Usage:
   jules.py activities <session-id> [n]     Print the latest n activities (default 10)
   jules.py approve <session-id>            Approve the pending plan
   jules.py message <session-id> <text>     Send a follow-up message to Jules
+  jules.py archive <session-id>            Archive a finished or abandoned session (frees a concurrency slot)
   jules.py wait <session-id> [timeout-s]   Block until the session needs attention or finishes
   jules.py wait-reply <session-id> [timeout-s]
                                            Block until Jules posts a new activity (e.g. a revised plan
@@ -138,6 +139,9 @@ def main():
     elif cmd == "approve":
         call("POST", f"{sid(arg)}:approvePlan", {})
         print("plan approved")
+    elif cmd == "archive":
+        call("POST", f"{sid(arg)}:archive", {})
+        print("session archived")
     elif cmd == "message":
         call("POST", f"{sid(arg)}:sendMessage", {"prompt": " ".join(sys.argv[3:])})
         print("message sent")
