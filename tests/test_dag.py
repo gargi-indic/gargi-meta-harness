@@ -67,3 +67,38 @@ def test_ready_set():
 
     ready = ready_set(issues, running, escalate_labels)
     assert ready == [2]
+
+
+def test_find_cycle_diamond_ladder():
+    import time
+    # Create a 25-node diamond ladder
+    # Node N connects to N+1, N+2. Node N+1 connects to N+3, Node N+2 connects to N+3
+    # Wait, simple diamond ladder:
+    # 0 -> 1, 2
+    # 1 -> 3
+    # 2 -> 3
+    # 3 -> 4, 5
+    # 4 -> 6
+    # 5 -> 6
+    # ...
+    # This creates multiple paths.
+
+    issues = []
+    for i in range(0, 24, 3):
+        # diamond i
+        issues.append(_make_issue(i, blocked_by=[i + 1, i + 2]))
+        issues.append(_make_issue(i + 1, blocked_by=[i + 3]))
+        issues.append(_make_issue(i + 2, blocked_by=[i + 3]))
+
+    issues.append(_make_issue(24, blocked_by=[]))
+
+    start_time = time.time()
+    assert find_cycle(issues) is None
+    assert time.time() - start_time < 1.0
+
+    # Add a cycle
+    issues.append(_make_issue(25, blocked_by=[0]))
+    issues[-2] = _make_issue(24, blocked_by=[25])
+
+    cycle = find_cycle(issues)
+    assert cycle is not None

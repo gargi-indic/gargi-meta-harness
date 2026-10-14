@@ -20,23 +20,50 @@ def blocked(issues: list[IssueRow]) -> dict[int, list[int]]:
 
 
 def find_cycle(issues: list[IssueRow]) -> list[int] | None:
-    """Find a cycle in the blocked_by dependencies using iterative DFS.
+    """Find a cycle in the blocked_by dependencies using iterative 3-color DFS.
     Returns the list of issue numbers in the cycle, or None.
     """
     blocker_map = {i.number: i.blocked_by for i in issues}
 
-    # We want to find cycles.
-    for start_node in blocker_map:
-        stack = [(start_node, [start_node])]
+    white = set(blocker_map.keys())
+    grey = set()
+    black = set()
+
+    for start_node in list(white):
+        if start_node not in white:
+            continue
+
+        stack = [(start_node, False)]  # (node, is_backtrack)
+        path_stack = []
 
         while stack:
-            node, path = stack.pop()
+            node, is_backtrack = stack.pop()
+
+            if is_backtrack:
+                grey.remove(node)
+                black.add(node)
+                if path_stack:
+                    path_stack.pop()
+                continue
+
+            if node in black:
+                continue
+
+            if node in grey:
+                # Cycle found!
+                cycle_start_idx = path_stack.index(node)
+                return path_stack[cycle_start_idx:] + [node]
+
+            if node in white:
+                white.remove(node)
+            grey.add(node)
+            path_stack.append(node)
+            stack.append((node, True))
+
             for neighbor in blocker_map.get(node, []):
-                if neighbor in path:
-                    # Cycle found!
-                    cycle_start_idx = path.index(neighbor)
-                    return path[cycle_start_idx:] + [neighbor]
-                stack.append((neighbor, path + [neighbor]))
+                if neighbor in black:
+                    continue
+                stack.append((neighbor, False))
 
     return None
 

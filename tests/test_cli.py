@@ -31,33 +31,45 @@ def mock_global_config(temp_home):
 
 
 @patch("harness.cli._make_github")
-@patch("harness.cli.ensure_harness_labels")
-def test_init(mock_ensure, mock_make_gh, mock_global_config):
+def test_init(mock_make_gh, mock_global_config, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "fake_super_secret_token_123")
+
     mock_gh = MagicMock()
 
-    async def mock_ensure_coro(*args, **kwargs):
+    # Need to mock aclose because it is awaited in cli
+    async def mock_aclose(*args, **kwargs):
         pass
 
-    mock_ensure.side_effect = mock_ensure_coro
+    mock_gh.aclose = mock_aclose
     mock_make_gh.return_value = mock_gh
 
-    result = runner.invoke(app, ["init", "owner/repo"])
-    assert result.exit_code == 0
-    assert "default_playbook: plan-build-review" in result.stdout
-    assert "token" not in result.stdout.lower()
+    with patch("harness.cli.ensure_harness_labels", new_callable=MagicMock) as mock_ensure:
 
-    # Check config was saved
-    from harness.config import load_global
+        async def mock_ensure_coro(*args, **kwargs):
+            pass
 
-    cfg = load_global()
-    assert len(cfg.repos) == 1
-    assert cfg.repos[0].name == "owner/repo"
+        mock_ensure.side_effect = mock_ensure_coro
+
+        result = runner.invoke(app, ["init", "owner/repo"])
+        assert result.exit_code == 0
+        assert "default_playbook: plan-build-review" in result.stdout
+        assert "fake_super_secret_token_123" not in result.stdout
+
+        mock_ensure.assert_called_once_with(mock_gh, "owner/repo")
+
+        # Check config was saved
+        from harness.config import load_global
+
+        cfg = load_global()
+        assert len(cfg.repos) == 1
+        assert cfg.repos[0].name == "owner/repo"
 
 
 def test_status_no_db(mock_global_config):
-    result = runner.invoke(app, ["status"])
-    assert result.exit_code == 1
-    assert "not synced: run harness sync" in result.stdout
+    with patch("harness.cli._make_github", side_effect=Exception("Should not construct github client")):
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 1
+        assert "no repos registered: run harness init <owner/repo>" in result.stdout
 
 
 def test_status_seeded_db(mock_global_config):
@@ -110,16 +122,21 @@ def test_status_seeded_db(mock_global_config):
     upsert_issue(store, issue3)
     store.close()
 
-    # Needs a repo in config
-    mock_global_config.repos.append(type("obj", (object,), {"name": "owner/repo"}))
-    from harness.config import save_global
+    from harness.config import RepoEntry, save_global
 
+    mock_global_config.repos.append(RepoEntry(name="owner/repo"))
     save_global(mock_global_config)
 
-    result = runner.invoke(app, ["status", "owner/repo"])
+    with patch("harness.cli._make_github", side_effect=Exception("Should not construct github client")):
+        result = runner.invoke(app, ["status", "owner/repo"])
+        assert result.exit_code == 0
+        assert "Epic" in result.stdout
+        assert "EPIC" in result.stdout
+        assert "READY" in result.stdout
+        assert "BLOCKED" in result.stdout
+        assert "ready: #2" in result.stdout
+
+
+def test_version():
+    result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "Epic" in result.stdout
-    assert "EPIC" in result.stdout
-    assert "READY" in result.stdout
-    assert "BLOCKED" in result.stdout
-    assert "ready: #2" in result.stdout
