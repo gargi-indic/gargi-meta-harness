@@ -40,4 +40,14 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
 ## State
-- 2026-10-14: seed pushed (README and `docs/PLAN.md`), log issue #1 created, M0 and M1 backlog created, orchestrator files committed. The next step is to start #3 (M0.1 scaffold + CI).
+- 2026-10-14: **M0 complete** (#3–#9 merged; epic #2 closed). M1 is in progress, starting with #11 (M1.1). The human said to continue through M1 without asking.
+- The live table is in #1. Helpers in the orchestrator scratchpad aren't persisted; the commands are all in the skill.
+
+## Lessons from this build (in addition to docs/LESSONS.md)
+1. **Archive every Jules session** (`jules.py archive`) after merge or handoff. Open sessions use up Jules's concurrency limit (new sessions then sit `PAUSED`), and an abandoned FAILED session came back to life and opened a duplicate PR (#65).
+2. **The plan-approval message is the main lever.** Every M0 plan was a list of intentions. Approving it together with a numbered binding spec (exact signatures, semantics, test list, references to existing modules) worked well.
+3. **respx strictness:** use `pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True)`. Assigning the attributes on the fixture does nothing.
+4. **Tests must inject `sleep`/`clock` and use `write_spacing=0.0`** for `GitHub(...)`; otherwise tests sleep for real.
+5. **Jules gets stuck on pytest-only failures** (shared state, mutable defaults). Hand off to the Sonnet fallback after two unhelpful rounds.
+6. **First-pass reviews by a Sonnet subagent** (read-only, with the issue, the binding spec and a local test run) find real bugs: a wrong endpoint, a lost update, reversed NULL ordering. Always verify the key findings in the diff before sending them.
+7. **`gh issue edit` (GraphQL) failed intermittently**; use REST (`gh api ... --method PATCH`) for issue body edits.
