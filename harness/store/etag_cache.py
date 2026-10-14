@@ -17,7 +17,7 @@ class SqliteEtagCache(EtagCache):
         return r["etag"], json.loads(r["body_json"])
 
     def put(self, url: str, etag: str, body: Any) -> None:
-        now = self.store.clock().isoformat()
+        now = self.store.now()
         body_json = json.dumps(body)
         self.store.execute(
             """

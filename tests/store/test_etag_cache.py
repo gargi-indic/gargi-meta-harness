@@ -9,9 +9,12 @@ from harness.store.db import Store
 from harness.store.etag_cache import SqliteEtagCache
 
 
-@pytest.fixture
-def store():
-    s = Store(":memory:", clock=lambda: datetime(2026, 10, 14, 16, 24, 5, tzinfo=UTC))
+@pytest.fixture(params=["memory", "file"])
+def store(request, tmp_path):
+    if request.param == "memory":
+        s = Store(":memory:", clock=lambda: datetime(2026, 10, 14, 16, 24, 5, tzinfo=UTC))
+    else:
+        s = Store(tmp_path / "test.db", clock=lambda: datetime(2026, 10, 14, 16, 24, 5, tzinfo=UTC))
     s.migrate()
     yield s
     s.close()
@@ -44,3 +47,6 @@ async def test_etag_cache_with_github(store):
             # Second fetch gets 304 and reads from cache
             repo2 = await gh.repo("owner/repo")
             assert repo2 == {"id": 42}
+
+            # Assert that the second request actually passed the cached ETag
+            assert route.calls[1].request.headers["If-None-Match"] == '"etag-1"'

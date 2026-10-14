@@ -67,7 +67,7 @@ def _parse_json_col(val: str | None, default: Any = None) -> Any:
 def upsert_repo(
     store: Store, full_name: str, default_branch: str | None, config: dict[str, Any] | None
 ) -> None:
-    now = store.clock().isoformat()
+    now = store.now()
     config_json = json.dumps(config) if config is not None else None
 
     store.execute(
@@ -181,7 +181,10 @@ def update_run(store: Store, run_id: str, **fields: Any) -> None:
         if k not in allowed_fields:
             raise ValueError(f"Unknown field {k} for run update")
 
-    now = store.clock().isoformat()
+    if "context" in fields and fields["context"] is None:
+        raise ValueError("context cannot be None")
+
+    now = store.now()
     fields["updated_at"] = now
 
     set_clauses = []
@@ -315,7 +318,7 @@ def steps_for_run(store: Store, run_id: str) -> list[StepRow]:
 
 def active_steps(store: Store) -> list[StepRow]:
     rows = store.query(
-        "SELECT * FROM steps WHERE status IN ('running', 'waiting') ORDER BY poll_after IS NULL, poll_after"
+        "SELECT * FROM steps WHERE status IN ('running', 'waiting') ORDER BY poll_after ASC, id ASC"
     )
     return [
         StepRow(
@@ -362,6 +365,9 @@ def decide_gate(
     note: str | None,
     decided_by: str | None,
 ) -> None:
+    if status not in {"approved", "rejected"}:
+        raise ValueError(f"Invalid status {status}")
+
     with store.tx():
         rows = store.query("SELECT status FROM gates WHERE id = ?", (gate_id,))
         if not rows:
@@ -369,7 +375,7 @@ def decide_gate(
         if rows[0]["status"] != "pending":
             raise ValueError(f"Gate {gate_id} is not pending")
 
-        now = store.clock().isoformat()
+        now = store.now()
         store.execute(
             "UPDATE gates SET status = ?, note = ?, decided_by = ?, decided_at = ? WHERE id = ?",
             (status, note, decided_by, now, gate_id),
@@ -403,7 +409,7 @@ def append_event(
     issue: int | None = None,
     run_id: str | None = None,
 ) -> int:
-    now = store.clock().isoformat()
+    now = store.now()
     cursor = store.execute(
         "INSERT INTO events (ts, repo, issue, run_id, kind, data_json) VALUES (?, ?, ?, ?, ?, ?)",
         (now, repo, issue, run_id, kind, json.dumps(data)),
