@@ -21,34 +21,47 @@ export KEY2="value2"
 KEY3='value3'
 
 KEY4 = value4
+KEY5=abc # note
+KEY6="a#b"
+invalid-key=val
+123key=val
 """
     result = parse_env_file(text)
-    assert result == {"KEY1": "value1", "KEY2": "value2", "KEY3": "value3", "KEY4": "value4"}
+    assert result == {
+        "KEY1": "value1",
+        "KEY2": "value2",
+        "KEY3": "value3",
+        "KEY4": "value4",
+        "KEY5": "abc",
+        "KEY6": "a#b",
+    }
 
 
 def test_load_env_files(tmp_path, monkeypatch, caplog):
     file1 = tmp_path / "env1"
     file2 = tmp_path / "env2"
-    file1.write_text("VAR1=val1\nVAR2=val2")
+    file1.write_text("VAR1=val1\nVAR2=val2\nVAR_EMPTY_FILE=\n")
     file2.write_text("VAR2=val2_new\nVAR3=val3")
 
     # Mock expanduser to point to tmp_path files if we were using ~
 
     monkeypatch.setenv("VAR1", "existing_val1")
+    monkeypatch.setenv("VAR_EMPTY_EXISTING", "")
+    file1.write_text(file1.read_text() + "VAR_EMPTY_EXISTING=new_val\n")
 
     # Use load_env_files
     loaded_keys = load_env_files([file1, file2])
 
     # VAR1 was already set, so it shouldn't be loaded/overwritten
     # VAR2 is set from file1, file2's VAR2 is ignored since it's already set by file1
-    # Wait, load_env_files updates os.environ directly, so file1 sets VAR2.
-    # Then for file2, VAR2 is already in os.environ (from file1), so it skips it.
 
     assert os.environ["VAR1"] == "existing_val1"
     assert os.environ["VAR2"] == "val2"
     assert os.environ["VAR3"] == "val3"
+    assert os.environ["VAR_EMPTY_EXISTING"] == "new_val"
+    assert "VAR_EMPTY_FILE" not in os.environ or os.environ["VAR_EMPTY_FILE"] == ""
 
-    assert loaded_keys == ["VAR2", "VAR3"]
+    assert loaded_keys == ["VAR2", "VAR_EMPTY_EXISTING", "VAR3"]
 
     # Check that values are never in returned list
     assert "val1" not in str(loaded_keys)
@@ -69,6 +82,12 @@ def test_github_token_env_vars(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "github_token_value")
     assert github_token() == "github_token_value"
 
+    # test empty vars
+    monkeypatch.setenv("GH_TOKEN", "")
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    with pytest.raises(RuntimeError):
+        github_token()
+
 
 @patch("subprocess.run")
 def test_github_token_subprocess(mock_run, monkeypatch):
@@ -82,6 +101,20 @@ def test_github_token_subprocess(mock_run, monkeypatch):
 
     assert github_token() == "subprocess_token"
     mock_run.assert_called_once_with(["gh", "auth", "token"], capture_output=True, text=True, check=True)
+
+
+@patch("subprocess.run")
+def test_github_token_subprocess_empty(mock_run, monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    class MockResult:
+        stdout = " \n"
+
+    mock_run.return_value = MockResult()
+
+    with pytest.raises(RuntimeError):
+        github_token()
 
 
 @patch("subprocess.run")

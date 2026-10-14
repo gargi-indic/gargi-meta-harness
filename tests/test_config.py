@@ -17,9 +17,18 @@ def test_repo_entry_validation():
         RepoEntry(name="invalidname")
     with pytest.raises(ValueError):
         RepoEntry(name="too/many/slashes")
+    with pytest.raises(ValueError):
+        RepoEntry(name="owner/")
+    with pytest.raises(ValueError):
+        RepoEntry(name="/repo")
+    with pytest.raises(ValueError):
+        RepoEntry(name=" / ")
 
     entry = RepoEntry(name="owner/repo")
     assert entry.name == "owner/repo"
+
+    entry = RepoEntry(name="gargi-indic/gargi-meta-harness")
+    assert entry.name == "gargi-indic/gargi-meta-harness"
 
 
 def test_global_config_defaults():
@@ -83,6 +92,16 @@ def test_repo_config_defaults():
     assert cfg.merge.method == "squash"
     assert cfg.merge.delete_branch is True
     assert cfg.command_users == []
+
+
+def test_escalate_config_failures():
+    from harness.config import EscalateConfig
+
+    with pytest.raises(ValueError):
+        EscalateConfig(failures=0)
+
+    cfg = EscalateConfig(failures=1)
+    assert cfg.failures == 1
 
 
 def test_parse_repo_config():

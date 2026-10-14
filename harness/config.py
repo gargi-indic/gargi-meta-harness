@@ -17,8 +17,14 @@ class RepoEntry(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
+        import re
+
         if "/" not in v or v.count("/") != 1:
             raise ValueError("name must be in the format owner/name")
+        parts = v.split("/")
+        pattern = re.compile(r"^[A-Za-z0-9_.-]+$")
+        if not all(pattern.match(p) for p in parts):
+            raise ValueError("name parts must match ^[A-Za-z0-9_.-]+$")
         return v
 
 
@@ -88,7 +94,7 @@ class AgentConfig(BaseModel):
 class EscalateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     labels: list[str] = Field(default_factory=lambda: ["needs-discussion"])
-    failures: int = 2
+    failures: int = Field(default=2, ge=1)
 
 
 class MergeConfig(BaseModel):

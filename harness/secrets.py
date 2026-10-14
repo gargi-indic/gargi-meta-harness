@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -14,6 +15,7 @@ SECRET_NAMES = (
 
 def parse_env_file(text: str) -> dict[str, str]:
     result = {}
+    identifier_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -30,8 +32,17 @@ def parse_env_file(text: str) -> dict[str, str]:
         key = key.strip()
         value = value.strip()
 
-        # Strip surrounding quotes if present
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        if not identifier_pattern.match(key):
+            continue
+
+        # Check for quotes
+        has_quotes = len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'")
+
+        if not has_quotes:
+            # Strip inline comments for unquoted values
+            if "#" in value:
+                value = value.split("#", 1)[0].strip()
+        else:
             value = value[1:-1]
 
         result[key] = value
@@ -53,7 +64,9 @@ def load_env_files(paths: list[Path]) -> list[str]:
 
         env_vars = parse_env_file(text)
         for key, value in env_vars.items():
-            if key not in os.environ:
+            if not value:
+                continue
+            if key not in os.environ or not os.environ[key]:
                 os.environ[key] = value
                 loaded_keys.append(key)
 
@@ -61,14 +74,17 @@ def load_env_files(paths: list[Path]) -> list[str]:
 
 
 def github_token() -> str:
-    if "GH_TOKEN" in os.environ:
+    if os.environ.get("GH_TOKEN"):
         return os.environ["GH_TOKEN"]
-    if "GITHUB_TOKEN" in os.environ:
+    if os.environ.get("GITHUB_TOKEN"):
         return os.environ["GITHUB_TOKEN"]
 
     try:
         result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
-        return result.stdout.strip()
+        token = result.stdout.strip()
+        if not token:
+            raise RuntimeError("no GitHub token: set GH_TOKEN or run `gh auth login`")
+        return token
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise RuntimeError("no GitHub token: set GH_TOKEN or run `gh auth login`") from e
 
