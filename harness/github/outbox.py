@@ -1,0 +1,302 @@
+import asyncio
+import json
+import time
+from collections import deque
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, cast
+
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from harness.github.client import GitHub, GitHubError
+from harness.github.control_table import ControlRow, upsert_row
+from harness.github.labels import ensure_harness_labels
+from harness.github.ledger import find_ledger
+from harness.store.db import Store
+from harness.store.repo import append_event
+
+OpType = Literal[
+    "add_comment",
+    "edit_comment",
+    "upsert_ledger",
+    "edit_issue_body",
+    "set_labels",
+    "merge_pull",
+    "delete_branch",
+    "close_issue",
+    "create_pull",
+]
+
+
+class OutboxPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repo: str
+
+
+class AddCommentPayload(OutboxPayload):
+    issue: int
+    body: str
+
+
+class EditCommentPayload(OutboxPayload):
+    comment_id: int
+    body: str
+
+
+class UpsertLedgerPayload(OutboxPayload):
+    issue: int
+    body: str
+
+
+class EditIssueBodyPayload(OutboxPayload):
+    issue: int
+    row: ControlRow
+
+
+class SetLabelsPayload(OutboxPayload):
+    issue: int
+    add: list[str]
+    remove: list[str]
+
+
+class MergePullPayload(OutboxPayload):
+    number: int
+    method: Literal["merge", "squash", "rebase"]
+    sha: str | None = None
+
+
+class DeleteBranchPayload(OutboxPayload):
+    branch: str
+
+
+class CloseIssuePayload(OutboxPayload):
+    issue: int
+
+
+class CreatePullPayload(OutboxPayload):
+    title: str
+    head: str
+    base: str
+    body: str
+
+
+_PAYLOAD_MODELS: dict[OpType, type[BaseModel]] = {
+    "add_comment": AddCommentPayload,
+    "edit_comment": EditCommentPayload,
+    "upsert_ledger": UpsertLedgerPayload,
+    "edit_issue_body": EditIssueBodyPayload,
+    "set_labels": SetLabelsPayload,
+    "merge_pull": MergePullPayload,
+    "delete_branch": DeleteBranchPayload,
+    "close_issue": CloseIssuePayload,
+    "create_pull": CreatePullPayload,
+}
+
+
+class Outbox:
+    def __init__(
+        self,
+        store: Store,
+        gh: GitHub,
+        *,
+        per_minute: int = 40,
+        clock: Callable[[], float] = time.monotonic,
+        on_ledger_comment: Callable[[str, int, int], Awaitable[None]] | None = None,
+    ) -> None:
+        self.store = store
+        self.gh = gh
+        self.per_minute = per_minute
+        self.clock = clock
+        self.on_ledger_comment = on_ledger_comment
+
+        self._send_times: deque[float] = deque()
+        self._ensured_labels_repos: set[str] = set()
+
+    def enqueue(self, op: OpType, payload: dict[str, Any], coalesce_key: str | None = None) -> int:
+        if op not in _PAYLOAD_MODELS:
+            raise ValueError(f"Unknown op {op}")
+
+        try:
+            model = _PAYLOAD_MODELS[op](**payload)
+        except ValidationError as e:
+            raise ValueError(f"Invalid payload for {op}: {e}") from e
+
+        repo = model.repo
+        payload_json = model.model_dump_json()
+
+        with self.store.tx():
+            if coalesce_key is not None:
+                existing = self.store.query(
+                    "SELECT id FROM outbox WHERE coalesce_key = ? AND status = 'pending'", (coalesce_key,)
+                )
+                if existing:
+                    row_id = existing[0]["id"]
+                    self.store.execute(
+                        """
+                        UPDATE outbox
+                        SET payload_json = ?, attempts = 0, last_error = NULL, not_before = NULL
+                        WHERE id = ?
+                        """,
+                        (payload_json, row_id),
+                    )
+                    return row_id
+
+            now = self.store.now()
+            cursor = self.store.execute(
+                """
+                INSERT INTO outbox (repo, op, coalesce_key, payload_json, status, attempts, created_at)
+                VALUES (?, ?, ?, ?, 'pending', 0, ?)
+                """,
+                (repo, op, coalesce_key, payload_json, now),
+            )
+            return cursor.lastrowid
+
+    def _can_send(self) -> bool:
+        now = self.clock()
+        while self._send_times and now - self._send_times[0] >= 60:
+            self._send_times.popleft()
+        return len(self._send_times) < self.per_minute
+
+    def _record_send(self) -> None:
+        self._send_times.append(self.clock())
+
+    async def drain_once(self) -> int:
+        now = self.store.now()
+        rows = self.store.query(
+            """
+            SELECT id, op, payload_json, coalesce_key, attempts
+            FROM outbox
+            WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?)
+            ORDER BY id ASC
+            """,
+            (now,),
+        )
+
+        sent_count = 0
+        for row in rows:
+            if not self._can_send():
+                break
+
+            op = cast(OpType, row["op"])
+            payload = json.loads(row["payload_json"])
+            row_id = row["id"]
+            attempts = row["attempts"]
+
+            try:
+                await self._process_op(op, payload)
+
+                with self.store.tx():
+                    self.store.execute(
+                        """
+                        UPDATE outbox
+                        SET status = 'sent', sent_at = ?, coalesce_key = NULL
+                        WHERE id = ?
+                        """,
+                        (self.store.now(), row_id),
+                    )
+                self._record_send()
+                sent_count += 1
+            except Exception as e:
+                attempts += 1
+                last_error = str(e) if isinstance(e, GitHubError) else repr(e)
+
+                if attempts >= 5:
+                    with self.store.tx():
+                        self.store.execute(
+                            """
+                            UPDATE outbox
+                            SET status = 'failed', last_error = ?, coalesce_key = NULL, attempts = ?
+                            WHERE id = ?
+                            """,
+                            (last_error, attempts, row_id),
+                        )
+                        repo = payload.get("repo", "")
+                        issue = payload.get("issue", None)
+                        if issue is None:
+                            issue = payload.get("number", 0)  # for merge_pull
+                        append_event(
+                            self.store,
+                            repo=repo,
+                            issue=issue,
+                            kind="outbox_failed",
+                            data={"outbox_id": row_id, "op": op, "error": last_error},
+                        )
+                else:
+                    delay = min((2**attempts) * 5, 600)
+                    not_before_dt = datetime.now(UTC) + timedelta(seconds=delay)
+                    not_before = not_before_dt.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                    with self.store.tx():
+                        self.store.execute(
+                            """
+                            UPDATE outbox
+                            SET attempts = ?, last_error = ?, not_before = ?
+                            WHERE id = ?
+                            """,
+                            (attempts, last_error, not_before, row_id),
+                        )
+
+        return sent_count
+
+    async def _process_op(self, op: OpType, payload: dict[str, Any]) -> None:
+        repo = payload["repo"]
+        if op == "add_comment":
+            await self.gh.add_comment(repo, payload["issue"], payload["body"])
+        elif op == "edit_comment":
+            await self.gh.edit_comment(repo, payload["comment_id"], payload["body"])
+        elif op == "upsert_ledger":
+            issue = payload["issue"]
+            body = payload["body"]
+            comments = await self.gh.comments(repo, issue)
+            ledger = find_ledger(comments)
+            if ledger is not None:
+                comment_id = ledger["id"]
+                await self.gh.edit_comment(repo, comment_id, body)
+            else:
+                resp = await self.gh.add_comment(repo, issue, body)
+                comment_id = resp["id"]
+            if self.on_ledger_comment is not None:
+                await self.on_ledger_comment(repo, issue, comment_id)
+        elif op == "edit_issue_body":
+            issue = payload["issue"]
+            row_dict = payload["row"]
+            row = ControlRow(**row_dict)
+            issue_data = await self.gh.issue(repo, issue)
+            current_body = issue_data.get("body") or ""
+            new_body = upsert_row(current_body, row)
+            await self.gh.update_issue(repo, issue, body=new_body)
+        elif op == "set_labels":
+            issue = payload["issue"]
+            if repo not in self._ensured_labels_repos:
+                await ensure_harness_labels(self.gh, repo)
+                self._ensured_labels_repos.add(repo)
+
+            if payload["add"]:
+                await self.gh.add_labels(repo, issue, payload["add"])
+            for label in payload["remove"]:
+                await self.gh.remove_label(repo, issue, label)
+        elif op == "merge_pull":
+            kwargs = {}
+            if payload.get("sha") is not None:
+                kwargs["sha"] = payload["sha"]
+            await self.gh.merge_pull(repo, payload["number"], payload["method"], **kwargs)
+        elif op == "delete_branch":
+            await self.gh.delete_branch(repo, payload["branch"])
+        elif op == "close_issue":
+            await self.gh.update_issue(repo, payload["issue"], state="closed")
+        elif op == "create_pull":
+            await self.gh.create_pull(
+                repo, payload["title"], payload["head"], payload["base"], body=payload["body"]
+            )
+
+    async def run(self, stop: asyncio.Event, idle_sleep: float = 2.0) -> None:
+        while not stop.is_set():
+            sent = await self.drain_once()
+            if sent == 0:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=idle_sleep)
+                except TimeoutError:
+                    pass
+            else:
+                # Give the event loop a tick to process stop event or other tasks
+                await asyncio.sleep(0)
