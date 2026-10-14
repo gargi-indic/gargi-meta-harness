@@ -1,0 +1,48 @@
+apiVersion: harness/v1
+id: plan-build-review
+name: Plan, build, review, merge
+description: One agent session plans, implements and fixes; a reviewer checks the plan and the PR; CI and scope checks gate the review; a human approves the merge.
+gates:
+  plan: auto
+  merge: human
+limits:
+  budget_usd: 20
+  timeout: 6h
+nodes:
+  plan:        {kind: agent, session: main, action: plan, agent: "{{ issue.agent }}"}
+  plan_review: {kind: review, target: plan, checklist: [scope, acceptance, decisions, existing-code], max_visits: 4}
+  revise_plan: {kind: agent, session: main, action: revise, expect: plan, message: "{{ prev.correction }}", max_visits: 3}
+  plan_gate:   {kind: gate, gate: plan, max_visits: 3}
+  implement:   {kind: agent, session: main, action: implement}
+  ci:          {kind: check, check: ci, max_visits: 5}
+  scope:       {kind: check, check: scope, max_visits: 5}
+  pr_review:   {kind: review, target: pr, checklist: [acceptance, scope, plan-match, pinned-versions], max_visits: 4}
+  fix:         {kind: agent, session: main, action: revise, expect: pr, message: "{{ prev.correction }}", max_visits: 3}
+  merge_gate:  {kind: gate, gate: merge, max_visits: 3}
+  merge:       {kind: merge, method: squash}
+  escalate:    {kind: escalate}
+edges:
+  plan.plan_ready: plan_review
+  plan.pr_ready: ci
+  plan_review.approve: plan_gate
+  plan_review.changes: revise_plan
+  revise_plan.plan_ready: plan_review
+  plan_gate.approved: implement
+  plan_gate.rejected: revise_plan
+  implement.pr_ready: ci
+  ci.pass: scope
+  ci.fail: fix
+  scope.pass: pr_review
+  scope.fail: fix
+  pr_review.approve: merge_gate
+  pr_review.changes: fix
+  fix.pr_ready: ci
+  merge_gate.approved: merge
+  merge_gate.rejected: fix
+  merge.merged: "@done"
+  escalate.resolved: "@done"
+  "*.escalate": escalate
+  "*.exhausted": escalate
+  "*.failed": escalate
+  "*.needs_input": escalate
+  "*.timeout": escalate

@@ -163,3 +163,50 @@ def status(repo: str = typer.Argument(None)) -> None:
         print(f"ready: {ready_str_list}")
     finally:
         store.close()
+
+
+playbook_app = typer.Typer(help="Playbook commands")
+app.add_typer(playbook_app, name="playbook")
+
+
+@playbook_app.command("validate")
+def playbook_validate(file: str) -> None:
+    """Validate a playbook file."""
+    from harness.playbook.load import PlaybookError, load_file
+    from harness.playbook.validate import validate
+
+    try:
+        pb = load_file(file)
+    except PlaybookError as e:
+        print(f"Error loading playbook: {e}")
+        raise typer.Exit(1) from None
+
+    issues = validate(pb)
+
+    if issues:
+        for issue in issues:
+            print(f"{issue.path}: {issue.code}: {issue.message}")
+        raise typer.Exit(1)
+    else:
+        print(f"ok: {pb.id} ({len(pb.nodes)} nodes)")
+
+
+@playbook_app.command("schema")
+def playbook_schema() -> None:
+    """Export the playbook JSON schema."""
+    import json
+
+    from harness.playbook.schema import playbook_json_schema
+
+    schema = playbook_json_schema()
+    print(json.dumps(schema, indent=2))
+
+
+@playbook_app.command("list")
+def playbook_list() -> None:
+    """List built-in playbooks."""
+    from harness.playbook.load import builtin_playbooks
+
+    playbooks = builtin_playbooks()
+    for pb_id in playbooks:
+        print(pb_id)
