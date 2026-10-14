@@ -32,6 +32,16 @@ def test_cli_schema():
     assert result.exit_code == 0
     schema = json.loads(result.stdout)
     assert "Playbook" in schema["title"]
+    # Check for kind discriminator
+    node_prop = (
+        schema.get("properties", {})
+        .get("nodes", {})
+        .get("patternProperties", {})
+        .get("^[a-z][a-z0-9_]*$", {})
+    )
+    assert "oneOf" in node_prop
+    assert "discriminator" in node_prop
+    assert node_prop["discriminator"]["propertyName"] == "kind"
 
 
 def test_cli_list():

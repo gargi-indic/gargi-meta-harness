@@ -21,17 +21,18 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
     wildcards: dict[str, str] = {}
 
     for key, target in pb.edges.items():
-        if key.startswith("*."):
-            port = key[2:]
-            wildcards[port] = target
-        elif "." in key:
-            node_id, port = key.split(".", 1)
-            if node_id not in pb.nodes:
-                issues.append(PlaybookIssue(f"edges.{key}", "unknown_node", f"Unknown node {node_id}"))
-            else:
-                routes[node_id][port] = target
-        else:
+        parts = key.split(".")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
             issues.append(PlaybookIssue(f"edges.{key}", "bad_edge_key", f"Malformed edge key {key}"))
+        else:
+            node_id, port = parts
+            if node_id == "*":
+                wildcards[port] = target
+            else:
+                if node_id not in pb.nodes:
+                    issues.append(PlaybookIssue(f"edges.{key}", "unknown_node", f"Unknown node {node_id}"))
+                else:
+                    routes[node_id][port] = target
 
         if target not in pb.nodes and target not in ("@done", "@failed"):
             issues.append(PlaybookIssue(f"edges.{key}", "bad_target", f"Bad target {target}"))
@@ -39,21 +40,6 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
     # Check node ports
     for node_id, node in pb.nodes.items():
         ports = node.ports()
-        if node.kind == "branch":
-            for i, case in enumerate(node.cases):
-                if case.port not in routes[node_id] and case.port not in wildcards:
-                    issues.append(
-                        PlaybookIssue(
-                            f"nodes.{node_id}.cases[{i}]", "unrouted_port", f"Unrouted port {case.port}"
-                        )
-                    )
-            if node.default not in routes[node_id] and node.default not in wildcards:
-                issues.append(
-                    PlaybookIssue(
-                        f"nodes.{node_id}.default", "unrouted_port", f"Unrouted port {node.default}"
-                    )
-                )
-
         for port in ports:
             if port not in routes.get(node_id, {}) and port not in wildcards:
                 issues.append(
@@ -80,7 +66,7 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
                     )
                 )
 
-            if agent_caps and not node.agent.startswith("{{") and not node.agent.endswith("}}"):
+            if agent_caps is not None and not node.agent.startswith("{{") and not node.agent.endswith("}}"):
                 caps = agent_caps.get(node.agent, set())
                 if node.action == "plan" and "plan" not in caps:
                     issues.append(

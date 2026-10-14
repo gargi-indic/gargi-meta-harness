@@ -37,14 +37,15 @@ def load_file(path: str | Path) -> Playbook:
 def builtin_playbooks() -> dict[str, Playbook]:
     playbooks = {}
     try:
-        # For Python 3.12, importlib.resources.files is preferred
         pkg = importlib.resources.files("harness.playbooks")
         for p in pkg.iterdir():
             if p.name.endswith(".yaml") or p.name.endswith(".yml"):
-                text = p.read_text(encoding="utf-8")
-                pb = load_playbook(text)
-                playbooks[pb.id] = pb
-    except Exception:
-        # In case package is not structured properly or missing playbooks dir
+                try:
+                    text = p.read_text(encoding="utf-8")
+                    pb = load_playbook(text)
+                    playbooks[pb.id] = pb
+                except PlaybookError as e:
+                    raise PlaybookError(f"{p.name}: {e}") from e
+    except FileNotFoundError:
         pass
     return playbooks

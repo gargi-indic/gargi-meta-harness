@@ -45,6 +45,3 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"harness/playbooks" = "harness/playbooks"
