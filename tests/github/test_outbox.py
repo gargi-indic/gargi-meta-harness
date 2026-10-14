@@ -9,6 +9,11 @@ from harness.github.ledger import LEDGER_MARKER
 from harness.github.outbox import Outbox
 from harness.store.db import Store
 
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.respx(assert_all_called=True, assert_all_mocked=True),
+]
+
 
 class FakeClock:
     def __init__(self) -> None:
@@ -27,8 +32,10 @@ def store(tmp_path) -> Store:
 
 @pytest.fixture
 def gh(respx_mock) -> GitHub:
-    # use respx_mock to ensure the mock is active before the client is instantiated
-    g = GitHub("token")
+    async def fake_sleep(duration):
+        pass
+
+    g = GitHub("test-token", write_spacing=0.0, sleep=fake_sleep)
     g._max_retries = 0
     return g
 
@@ -43,11 +50,7 @@ def outbox(store: Store, gh: GitHub, clock: FakeClock) -> Outbox:
     return Outbox(store, gh, clock=clock)
 
 
-@pytest.mark.asyncio
 async def test_lost_update(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     outbox.enqueue("add_comment", {"repo": "a/b", "issue": 1, "body": "first"}, coalesce_key="key1")
 
@@ -75,18 +78,14 @@ async def test_lost_update(respx_mock, store: Store, gh: GitHub, clock: FakeCloc
     assert rows[0]["status"] == "sent"
 
 
-def test_enqueue_validates_payload(outbox: Outbox):
+async def test_enqueue_validates_payload(outbox: Outbox):
     with pytest.raises(ValueError, match="Invalid payload"):
         outbox.enqueue("add_comment", {"repo": "user/repo", "issue": 1})  # missing body
     with pytest.raises(ValueError, match="Unknown op"):
         outbox.enqueue("unknown", {})
 
 
-@pytest.mark.asyncio
 async def test_coalescing(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
 
     id1 = outbox.enqueue("add_comment", {"repo": "a/b", "issue": 1, "body": "first"}, coalesce_key="key1")
@@ -116,11 +115,7 @@ async def test_coalescing(respx_mock, store: Store, gh: GitHub, clock: FakeClock
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_upsert_ledger_find_existing(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     outbox.enqueue("upsert_ledger", {"repo": "a/b", "issue": 1, "body": "new ledger"})
 
@@ -137,11 +132,7 @@ async def test_upsert_ledger_find_existing(respx_mock, store: Store, gh: GitHub,
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_upsert_ledger_create_new(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     outbox.enqueue("upsert_ledger", {"repo": "a/b", "issue": 1, "body": "new ledger"})
 
@@ -152,11 +143,7 @@ async def test_upsert_ledger_create_new(respx_mock, store: Store, gh: GitHub, cl
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_edit_issue_body(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     row = ControlRow(issue=10, title="T", status="ready")
     outbox.enqueue("edit_issue_body", {"repo": "a/b", "issue": 1, "row": row.__dict__})
@@ -179,11 +166,7 @@ async def test_edit_issue_body(respx_mock, store: Store, gh: GitHub, clock: Fake
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_backoff_and_fail(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     # ensure it doesn't backoff internally
     gh._max_retries = 0
 
@@ -233,11 +216,7 @@ async def test_backoff_and_fail(respx_mock, store: Store, gh: GitHub, clock: Fak
     assert "token" not in events[0]["data_json"]
 
 
-@pytest.mark.asyncio
 async def test_rate_limit(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock, per_minute=2)
 
     outbox.enqueue("add_comment", {"repo": "a/b", "issue": 1, "body": "m1"})
@@ -261,17 +240,16 @@ async def test_rate_limit(respx_mock, store: Store, gh: GitHub, clock: FakeClock
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_restart(respx_mock, store: Store, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
+    async def fake_sleep(duration):
+        pass
 
-    gh1 = GitHub("token")
+    gh1 = GitHub("test-token", write_spacing=0.0, sleep=fake_sleep)
     gh1._max_retries = 0
     outbox1 = Outbox(store, gh1, clock=clock)
     outbox1.enqueue("add_comment", {"repo": "a/b", "issue": 1, "body": "survives"})
 
-    gh2 = GitHub("token")
+    gh2 = GitHub("test-token", write_spacing=0.0, sleep=fake_sleep)
     gh2._max_retries = 0
     outbox2 = Outbox(store, gh2, clock=clock)
     respx_mock.post("https://api.github.com/repos/a/b/issues/1/comments").respond(201, json={"id": 1})
@@ -280,11 +258,7 @@ async def test_restart(respx_mock, store: Store, clock: FakeClock):
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_three_coalesced_upsert_ledgers(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     outbox.enqueue("upsert_ledger", {"repo": "a/b", "issue": 1, "body": "first"}, coalesce_key="ledger_1")
     outbox.enqueue("upsert_ledger", {"repo": "a/b", "issue": 1, "body": "second"}, coalesce_key="ledger_1")
@@ -308,11 +282,7 @@ async def test_three_coalesced_upsert_ledgers(respx_mock, store: Store, gh: GitH
     assert patch_mock.call_count == 1
 
 
-@pytest.mark.asyncio
 async def test_upsert_ledger_create_then_edit(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     called_ids = []
 
     async def callback(repo, issue, comment_id):
@@ -341,11 +311,7 @@ async def test_upsert_ledger_create_then_edit(respx_mock, store: Store, gh: GitH
     assert called_ids == [100, 100]
 
 
-@pytest.mark.asyncio
 async def test_restart_file_db(respx_mock, tmp_path, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     db_path = tmp_path / "test.db"
     store1 = Store(db_path)
     store1.migrate()
@@ -364,11 +330,7 @@ async def test_restart_file_db(respx_mock, tmp_path, gh: GitHub, clock: FakeCloc
     store2.close()
 
 
-@pytest.mark.asyncio
 async def test_drain_order_by_id(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
 
     outbox.enqueue("add_comment", {"repo": "a/b", "issue": 1, "body": "first"})
@@ -392,11 +354,7 @@ async def test_drain_order_by_id(respx_mock, store: Store, gh: GitHub, clock: Fa
     assert order == [1, 2]
 
 
-@pytest.mark.asyncio
 async def test_set_labels_add_and_remove(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     outbox.enqueue("set_labels", {"repo": "a/b", "issue": 1, "add": ["label1"], "remove": ["label2"]})
 
@@ -413,11 +371,7 @@ async def test_set_labels_add_and_remove(respx_mock, store: Store, gh: GitHub, c
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_close_issue(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     outbox = Outbox(store, gh, clock=clock)
     outbox.enqueue("close_issue", {"repo": "a/b", "issue": 1})
 
@@ -431,11 +385,7 @@ async def test_close_issue(respx_mock, store: Store, gh: GitHub, clock: FakeCloc
     assert sent == 1
 
 
-@pytest.mark.asyncio
 async def test_run_with_fake_sleep(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
-    respx_mock.assert_all_called = True
-    respx_mock.assert_all_mocked = True
-
     sleep_count = 0
     import asyncio
 
