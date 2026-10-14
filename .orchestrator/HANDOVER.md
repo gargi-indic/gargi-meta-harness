@@ -22,7 +22,13 @@ Epics are milestones. Tasks are real GitHub sub-issues with `blocked_by` links, 
 |---|---|---|
 | #2 | M0 Foundations | #3–#9 |
 | #10 | M1 Engine + Jules + reviewer (CLI) | #11–#21 |
-| (see #1) | M2–M5 | created after M0/M1 |
+| #22 | M2 Command center + playbook editor | #23–#32 |
+| #33 | M3 Local agents + parallelism | #34–#42 |
+| #43 | M4 Planner | #44–#50 |
+| #51 | M5 Copilot, Antigravity, ops | #52–#59 |
+
+`needs-discussion` (each states a proposed default; escalate on reaching it unless the human has confirmed): #40 (M3.7 parallel branch semantics), #44 (M4.1 what counts as plan approval), #52 (M5.1 Copilot route), #53 (M5.2 agy spike is half-manual: the human runs the probe locally).
+The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 
 ## Decisions recorded
 | Date | Decision | By |
