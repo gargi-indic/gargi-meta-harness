@@ -85,8 +85,11 @@ def test_github_token_env_vars(monkeypatch):
     # test empty vars
     monkeypatch.setenv("GH_TOKEN", "")
     monkeypatch.setenv("GITHUB_TOKEN", "")
-    with pytest.raises(RuntimeError):
-        github_token()
+    # Hermetic: never fall through to a real `gh auth token`, whatever the machine has logged in.
+    with patch("subprocess.run", side_effect=FileNotFoundError("gh")) as mock_run:
+        with pytest.raises(RuntimeError):
+            github_token()
+    mock_run.assert_called_once()
 
 
 @patch("subprocess.run")

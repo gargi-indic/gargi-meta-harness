@@ -1,8 +1,10 @@
 import asyncio
+import json
 import re
 import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, Literal, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -34,11 +36,35 @@ class MemoryEtagCache:
 
 
 class Response:
-    def __init__(self, status: int, body: Any, headers: httpx.Headers, cached: bool) -> None:
+    def __init__(
+        self, status: int, body: Any, headers: httpx.Headers, cached: bool, text: str | None = None
+    ) -> None:
         self.status = status
         self.body = body
         self.headers = headers
         self.cached = cached
+        if text is None:
+            text = body if isinstance(body, str) else json.dumps(body)
+        # Raw response text, never parsed.
+        self.text = text
+
+
+_RETRY_5XX = (500, 502, 503, 504)
+
+
+def _error_message(resp: httpx.Response, body: Any) -> str:
+    message = ""
+    errors: Any = None
+    if isinstance(body, dict):
+        message = str(body.get("message") or "")
+        errors = body.get("errors")
+    elif isinstance(body, str):
+        message = body.strip()
+    if not message:
+        message = resp.reason_phrase or f"HTTP {resp.status_code}"
+    if errors:
+        message = f"{message} (errors: {errors})"
+    return message
 
 
 class GitHub:
@@ -51,14 +77,18 @@ class GitHub:
         write_spacing: float = 1.0,
         max_retries: int = 4,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._token = token
         self._base_url = base_url.rstrip("/")
-        self._cache = cache
+        # Each client owns its cache unless one is injected explicitly.
+        self._cache: EtagCache = cache if cache is not None else MemoryEtagCache()
         self._write_spacing = write_spacing
         self._max_retries = max_retries
         self._sleep = sleep
+        self._clock = clock
+        self._wall_clock = wall_clock
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -67,19 +97,51 @@ class GitHub:
             "User-Agent": "gargi-harness",
         }
         self._client = httpx.AsyncClient(base_url=self._base_url, headers=headers, transport=transport)
-        self._last_write = 0.0
+        self._last_write: float | None = None
         self._write_lock = asyncio.Lock()
 
     def __repr__(self) -> str:
         return f"GitHub(base_url={self._base_url!r})"
 
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "GitHub":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
     async def _wait_for_write(self) -> None:
         async with self._write_lock:
-            now = time.time()
-            elapsed = now - self._last_write
-            if elapsed < self._write_spacing:
-                await self._sleep(self._write_spacing - elapsed)
-            self._last_write = time.time()
+            if self._last_write is not None:
+                elapsed = self._clock() - self._last_write
+                if elapsed < self._write_spacing:
+                    await self._sleep(self._write_spacing - elapsed)
+            self._last_write = self._clock()
+
+    def _retry_delay(self, resp: httpx.Response, attempt: int) -> float | None:
+        """Seconds to wait before retrying, or None if the response is not retryable."""
+        status = resp.status_code
+        if status in (403, 429):
+            if "retry-after" in resp.headers:
+                try:
+                    return min(max(float(resp.headers["retry-after"]), 0.0), 300.0)
+                except ValueError:
+                    return 60.0
+            if resp.headers.get("x-ratelimit-remaining") == "0" and "x-ratelimit-reset" in resp.headers:
+                try:
+                    reset = float(resp.headers["x-ratelimit-reset"])
+                except ValueError:
+                    reset = None
+                if reset is not None:
+                    return min(max(reset - self._wall_clock(), 1.0), 900.0)
+            if "secondary rate limit" in resp.text.lower():
+                return 60.0 * (attempt + 1)
+            return None
+        if status in _RETRY_5XX:
+            return float(2**attempt)
+        return None
 
     async def request(
         self,
@@ -89,84 +151,66 @@ class GitHub:
         json: Any = None,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        raw: bool = False,
     ) -> Response:
+        """Send a request. With raw=True the body is the unparsed response text."""
         method = method.upper()
         if method != "GET":
             await self._wait_for_write()
 
-        url = f"{self._base_url}/{path.lstrip('/')}"
+        if path.startswith(("http://", "https://")):
+            url = path
+        else:
+            url = f"{self._base_url}/{path.lstrip('/')}"
         req = self._client.build_request(method, url, json=json, params=params, headers=headers)
         cache_key = str(req.url)
 
-        for attempt in range(self._max_retries + 1):
-            req_headers = dict(req.headers)
-            if method == "GET" and self._cache:
+        use_etag = method == "GET"
+        attempt = 0
+        while True:
+            req.headers.pop("If-None-Match", None)
+            if use_etag:
                 cached = self._cache.get(cache_key)
-                if cached:
-                    etag, _ = cached
-                    req_headers["If-None-Match"] = etag
+                if cached is not None:
+                    req.headers["If-None-Match"] = cached[0]
 
-            # Re-build request to include If-None-Match properly per attempt
-            current_req = self._client.build_request(
-                method, url, json=json, params=params, headers=req_headers
-            )
             try:
-                resp = await self._client.send(current_req)
+                resp = await self._client.send(req)
             except httpx.RequestError as e:
-                # Should not reach here typically since tests run respx without network, but handle properly
-                raise GitHubError(500, method, path, str(e)) from e
+                raise GitHubError(500, method, path, f"{type(e).__name__}: {e}") from e
 
-            if resp.status_code == 304 and method == "GET" and self._cache:
+            if resp.status_code == 304 and method == "GET":
                 cached = self._cache.get(cache_key)
-                if cached:
-                    _, body = cached
-                    return Response(304, body, resp.headers, cached=True)
-
-            # Check JSON response if any
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-
-            message = ""
-            if isinstance(body, dict):
-                message = body.get("message", "")
-
-            if resp.status_code in (403, 429) or (
-                isinstance(body, dict) and "secondary rate limit" in message.lower()
-            ):
-                if attempt < self._max_retries:
-                    delay = 0.0
-                    if "retry-after" in resp.headers:
-                        delay = min(float(resp.headers["retry-after"]), 300.0)
-                    elif (
-                        resp.headers.get("x-ratelimit-remaining") == "0"
-                        and "x-ratelimit-reset" in resp.headers
-                    ):
-                        reset = float(resp.headers["x-ratelimit-reset"])
-                        delay = min(max(reset - time.time(), 0.0), 900.0)
-                    elif isinstance(body, dict) and "secondary rate limit" in message.lower():
-                        delay = 60.0 * (attempt + 1)
-
-                    if delay > 0:
-                        await self._sleep(delay)
-                        continue
-
-            if resp.status_code >= 500:
-                if attempt < self._max_retries:
-                    await self._sleep(2**attempt)
+                if cached is not None:
+                    return Response(200, cached[1], resp.headers, cached=True)
+                if use_etag:
+                    # 304 without a usable cache entry: retry once without conditional headers.
+                    use_etag = False
                     continue
+                raise GitHubError(304, method, path, "Not Modified, but no cached response is available")
 
-            if resp.status_code >= 400:
-                raise GitHubError(resp.status_code, method, path, message or str(body))
+            if raw:
+                body: Any = resp.text
+            else:
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = resp.text
 
-            if method == "GET" and self._cache and "etag" in resp.headers:
-                self._cache.put(cache_key, resp.headers["etag"], body)
+            if resp.status_code < 400:
+                if method == "GET" and "etag" in resp.headers:
+                    self._cache.put(cache_key, resp.headers["etag"], body)
+                return Response(resp.status_code, body, resp.headers, cached=False, text=resp.text)
 
-            return Response(resp.status_code, body, resp.headers, cached=False)
-
-        # Should not get here, but just in case
-        raise GitHubError(500, method, path, "Max retries exceeded")
+            delay = self._retry_delay(resp, attempt)
+            if delay is None or attempt >= self._max_retries:
+                try:
+                    error_body: Any = resp.json()
+                except ValueError:
+                    error_body = resp.text
+                raise GitHubError(resp.status_code, method, path, _error_message(resp, error_body))
+            await self._sleep(delay)
+            attempt += 1
 
     async def get(self, path: str, **params: Any) -> Any:
         resp = await self.request("GET", path, params=params)
@@ -188,47 +232,45 @@ class GitHub:
         await self.request("DELETE", path)
 
     async def paginate(self, path: str, **params: Any) -> AsyncGenerator[Any, None]:
-        params["per_page"] = 100
-        url = path
+        """Yield items across pages. Params apply to the first request only; Link URLs carry their own."""
+        url: str | None = path
+        page_params: dict[str, Any] | None = {"per_page": 100, **params}
         while url:
-            resp = await self.request("GET", url, params=params if url == path else None)
-            if isinstance(resp.body, list):
-                for item in resp.body:
+            resp = await self.request("GET", url, params=page_params)
+            page_params = None
+            body = resp.body
+            if isinstance(body, dict):
+                body = next((v for v in body.values() if isinstance(v, list)), [])
+            if isinstance(body, list):
+                for item in body:
                     yield item
-            elif isinstance(resp.body, dict):
-                if "items" in resp.body:
-                    for item in resp.body["items"]:
-                        yield item
-                elif "check_runs" in resp.body:
-                    for item in resp.body["check_runs"]:
-                        yield item
 
             url = None
-            link_header = resp.headers.get("link", "")
-            if link_header:
-                for match in re.finditer(r'<([^>]+)>;\s*rel="([^"]+)"', link_header):
-                    if match.group(2) == "next":
-                        url_str = match.group(1)
-                        if url_str.startswith(self._base_url):
-                            url = url_str[len(self._base_url) :]
-                        else:
-                            url = url_str
-                        break
+            for match in re.finditer(r'<([^>]+)>\s*;\s*rel="?([^";,]+)"?', resp.headers.get("link", "")):
+                if match.group(2) == "next":
+                    url = match.group(1)
+                    break
 
     # Typed helpers
     async def repo(self, repo: str) -> dict[str, Any]:
         return await self.get(f"repos/{repo}")
 
     async def file_text(self, repo: str, path: str, ref: str | None = None) -> str | None:
-        params = {"ref": ref} if ref else {}
+        params = {"ref": ref} if ref else None
         headers = {"Accept": "application/vnd.github.raw+json"}
         try:
-            resp = await self.request("GET", f"repos/{repo}/contents/{path}", params=params, headers=headers)
-            return resp.body
+            resp = await self.request(
+                "GET",
+                f"repos/{repo}/contents/{quote(path, safe='/')}",
+                params=params,
+                headers=headers,
+                raw=True,
+            )
         except GitHubError as e:
             if e.status == 404:
                 return None
             raise
+        return resp.text
 
     async def issue(self, repo: str, number: int) -> dict[str, Any]:
         return await self.get(f"repos/{repo}/issues/{number}")
@@ -267,24 +309,30 @@ class GitHub:
 
     async def remove_label(self, repo: str, number: int, label: str) -> None:
         try:
-            await self.delete(f"repos/{repo}/issues/{number}/labels/{label}")
+            await self.delete(f"repos/{repo}/issues/{number}/labels/{quote(label, safe='')}")
         except GitHubError as e:
             if e.status != 404:
                 raise
 
     async def ensure_label(
-        self, repo: str, name: str, color: str | None = None, description: str | None = None
-    ) -> dict[str, Any]:
+        self, repo: str, name: str, color: str | None = None, description: str | None = ""
+    ) -> dict[str, Any] | None:
+        """Create the label if missing; 422 (already exists) is ignored and returns None."""
+        payload: dict[str, Any] = {"name": name}
+        if color is not None:
+            payload["color"] = color
+        if description is not None:
+            payload["description"] = description
         try:
-            return await self.post(f"repos/{repo}/labels", name=name, color=color, description=description)
+            return await self.post(f"repos/{repo}/labels", **payload)
         except GitHubError as e:
             if e.status != 422:
                 raise
-            return await self.patch(f"repos/{repo}/labels/{name}", color=color, description=description)
+            return None
 
     async def parent(self, repo: str, number: int) -> dict[str, Any] | None:
         try:
-            return await self.get(f"repos/{repo}/issues/{number}/sub_issues/parent")
+            return await self.get(f"repos/{repo}/issues/{number}/parent")
         except GitHubError as e:
             if e.status == 404:
                 return None
@@ -329,7 +377,7 @@ class GitHub:
 
     async def delete_branch(self, repo: str, branch: str) -> None:
         try:
-            await self.delete(f"repos/{repo}/git/refs/heads/{branch}")
+            await self.delete(f"repos/{repo}/git/refs/heads/{quote(branch, safe='/')}")
         except GitHubError as e:
             if e.status not in (404, 422):
                 raise
