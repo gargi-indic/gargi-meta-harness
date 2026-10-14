@@ -3,15 +3,16 @@ import json
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from harness.github.client import GitHub, GitHubError
+from harness.github.client import GitHub
 from harness.github.control_table import ControlRow, upsert_row
 from harness.github.labels import ensure_harness_labels
 from harness.github.ledger import find_ledger
+from harness.secrets import redact
 from harness.store.db import Store
 from harness.store.repo import append_event
 
@@ -101,12 +102,14 @@ class Outbox:
         *,
         per_minute: int = 40,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_ledger_comment: Callable[[str, int, int], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         self.gh = gh
         self.per_minute = per_minute
         self.clock = clock
+        self.sleep = sleep
         self.on_ledger_comment = on_ledger_comment
 
         self._send_times: deque[float] = deque()
@@ -182,48 +185,57 @@ class Outbox:
             row_id = row["id"]
             attempts = row["attempts"]
 
+            payload_json = row["payload_json"]
+
+            self._record_send()  # Count attempts in the sliding window
+
             try:
                 await self._process_op(op, payload)
 
                 with self.store.tx():
-                    self.store.execute(
+                    cursor = self.store.execute(
                         """
                         UPDATE outbox
                         SET status = 'sent', sent_at = ?, coalesce_key = NULL
-                        WHERE id = ?
+                        WHERE id = ? AND payload_json = ?
                         """,
-                        (self.store.now(), row_id),
+                        (self.store.now(), row_id, payload_json),
                     )
-                self._record_send()
-                sent_count += 1
+                    if cursor.rowcount > 0:
+                        sent_count += 1
             except Exception as e:
                 attempts += 1
-                last_error = str(e) if isinstance(e, GitHubError) else repr(e)
+                last_error = f"{type(e).__name__}: {e}"
+                last_error = redact(last_error)
 
                 if attempts >= 5:
                     with self.store.tx():
-                        self.store.execute(
+                        cursor = self.store.execute(
                             """
                             UPDATE outbox
                             SET status = 'failed', last_error = ?, coalesce_key = NULL, attempts = ?
-                            WHERE id = ?
+                            WHERE id = ? AND payload_json = ?
                             """,
-                            (last_error, attempts, row_id),
+                            (last_error, attempts, row_id, payload_json),
                         )
-                        repo = payload.get("repo", "")
-                        issue = payload.get("issue", None)
-                        if issue is None:
-                            issue = payload.get("number", 0)  # for merge_pull
-                        append_event(
-                            self.store,
-                            repo=repo,
-                            issue=issue,
-                            kind="outbox_failed",
-                            data={"outbox_id": row_id, "op": op, "error": last_error},
-                        )
+                        if cursor.rowcount > 0:
+                            repo = payload.get("repo", "")
+                            issue = payload.get("issue", None)
+                            data = {"outbox_id": row_id, "op": op, "error": last_error}
+                            if issue is None:
+                                number = payload.get("number")
+                                if number is not None:
+                                    data["number"] = number
+                            append_event(
+                                self.store,
+                                repo=repo,
+                                issue=issue,
+                                kind="outbox_failed",
+                                data=data,
+                            )
                 else:
                     delay = min((2**attempts) * 5, 600)
-                    not_before_dt = datetime.now(UTC) + timedelta(seconds=delay)
+                    not_before_dt = self.store.clock() + timedelta(seconds=delay)
                     not_before = not_before_dt.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                     with self.store.tx():
@@ -231,9 +243,9 @@ class Outbox:
                             """
                             UPDATE outbox
                             SET attempts = ?, last_error = ?, not_before = ?
-                            WHERE id = ?
+                            WHERE id = ? AND payload_json = ?
                             """,
-                            (attempts, last_error, not_before, row_id),
+                            (attempts, last_error, not_before, row_id, payload_json),
                         )
 
         return sent_count
@@ -291,12 +303,6 @@ class Outbox:
 
     async def run(self, stop: asyncio.Event, idle_sleep: float = 2.0) -> None:
         while not stop.is_set():
-            sent = await self.drain_once()
-            if sent == 0:
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=idle_sleep)
-                except TimeoutError:
-                    pass
-            else:
-                # Give the event loop a tick to process stop event or other tasks
-                await asyncio.sleep(0)
+            await self.drain_once()
+            if not stop.is_set():
+                await self.sleep(idle_sleep)
