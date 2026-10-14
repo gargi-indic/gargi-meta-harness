@@ -66,13 +66,19 @@ Build order is **#1's build-order table**, which must respect the `blocked_by` l
 - **Comments:** one per event: `**YYYY-MM-DD · #N <event>.**` followed by short bullets.
 - Legend: ⏳ todo · 🧭 planning · 🛠 in progress · 🔍 in review · ✅ merged · ⛔ blocked
 
-## 4. Escalate to the human (comment on #1, then stop and wait) when
+## 4. When Jules is stuck: hand off to a Sonnet subagent
+This is the human's instruction (2026-10-14). If Jules loops on the same problem, asks for help twice without pushing, a session ends `FAILED`, or Jules says it can't be done:
+1. `message` Jules to stop and not push.
+2. Spawn a **Sonnet subagent**. Give it the issue, the review file, the binding plan details and the PR branch (or `main` if there's no PR). It works in a fresh scratchpad clone, makes ruff and pytest pass, and pushes to the **same branch** with no force-pushes. If there's no PR yet, it opens one titled `#N: <title>` with a body starting `Closes #N`.
+3. Review its push like any other PR, and log the handoff on #1.
+
+## 5. Escalate to the human (comment on #1, then stop and wait) when
 - An issue is labelled `needs-discussion` and has no recorded decision.
-- Jules fails twice on one task, a session ends `FAILED`, or Jules says something can't be done.
+- Both Jules and the Sonnet fallback fail on the same task.
 - A change would alter `docs/PLAN.md`'s architecture or the decisions in it, or add a dependency outside the stack in PLAN.md.
 - Anything destructive or administrative: force-push, history rewrite, repo settings, branch protection, keys, installing software on the human's machine.
 
-## 5. Hard rules and handover
+## 6. Hard rules and handover
 - One Jules session at a time, in build order.
 - The Jules key lives only in the environment.
 - Only `.orchestrator/` and `.claude/` may be pushed to `main` while a Jules task is running.

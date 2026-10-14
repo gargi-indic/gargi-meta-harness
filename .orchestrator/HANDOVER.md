@@ -37,6 +37,7 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | Gates configurable per playbook; visual editor in v1; local web app; act as the human's `gh` token | human |
 | 2026-10-14 | v1 adapters: Jules, Claude Code, Codex, Copilot, Antigravity | human |
 | 2026-10-14 | Built by Jules via this orchestrator (one session at a time); the orchestrator merges after review | human |
+| 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
 ## State
 - 2026-10-14: seed pushed (README and `docs/PLAN.md`), log issue #1 created, M0 and M1 backlog created, orchestrator files committed. The next step is to start #3 (M0.1 scaffold + CI).
