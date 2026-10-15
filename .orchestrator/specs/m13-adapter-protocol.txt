@@ -1,0 +1,39 @@
+Binding details for #13 (M1.3), in addition to the issue text:
+
+1. **Files:** `harness/adapters/base.py`, `harness/adapters/fake.py`, and `tests/adapters/` (with an `__init__.py`). Touch nothing else. No new dependencies.
+2. **`AgentState(StrEnum)`:** exactly `STARTING, PLANNING, PLAN_READY, WORKING, NEEDS_INPUT, PR_READY, FAILED`.
+3. **Pydantic models** (`extra="forbid"`):
+   - `Capabilities(plan_approval: bool, messaging: bool, opens_pr: bool, local_workspace: bool, max_concurrency: int = 1)` with `names() -> set[str]`. That method maps `plan_approval` → `"plan"`, `messaging` → `"message"`, `opens_pr` → `"pr"` and `local_workspace` → `"local"`. These names are what the playbook validator (#11) checks: `action: plan` needs `"plan"` and `action: revise` needs `"message"`.
+   - `StartRequest(repo, base_branch, branch, issue: int, title, brief, mode: Literal["plan_first", "direct"], idempotency_key, workdir: Path | None = None)`.
+   - `SessionRef(agent: str, id: str, url: str | None = None, data: dict = {})` (use `default_factory`).
+   - `PrRef(number: int, url: str, head_sha: str)`.
+   - `ActivityItem(ts: str, kind: str, text: str)`.
+   - `AgentSnapshot(state: AgentState, plan: str | None = None, question: str | None = None, pr: PrRef | None = None, activity: list[ActivityItem] = [], error: str | None = None, poll_after: float = 60.0)`.
+4. **`AgentAdapter`** is a `typing.Protocol` decorated `@runtime_checkable`, with attributes `name: str` and `caps: Capabilities` and the async methods `start`, `find`, `poll`, `approve_plan(ref, note=None)`, `send(ref, text)` and `cancel(ref)`, exactly as in the issue.
+5. **`AdapterRegistry`:** `register(adapter)`, which raises `ValueError` on a duplicate name; `get(name)`, which raises `KeyError` with the known names listed; `names()`; and `caps_by_name() -> dict[str, set[str]]`, returning the `names()` sets in the format the validator's `agent_caps` argument expects.
+6. **`FakeAdapter`:**
+   - Constructor: `FakeAdapter(name="fake", script: dict[str, list[list[AgentSnapshot]]] | None = None, caps: Capabilities | None = None)`.
+   - A script is a list of **phases**, keyed by idempotency key, or `"*"` as a default for any key. Each phase is a list of snapshots.
+   - `poll` returns the next snapshot in the current phase, and keeps returning that phase's **last** snapshot once the phase is exhausted.
+   - `approve_plan` and `send` advance to the next phase.
+   - Every call is recorded in `self.calls: list[tuple[str, dict]]`, e.g. `("send", {"session": id, "text": ...})`.
+   - Session ids are deterministic: `fake-1`, `fake-2`, and so on.
+   - `find(key)` returns the existing `SessionRef` for that key, and `start` with an existing key returns the same ref without recording a second `start`.
+   - `cancel` sets the state to `FAILED`, with error `"cancelled"`.
+   - Default caps: everything True, `max_concurrency=10`.
+   - Builders are classmethods that return a `FakeAdapter` with a `"*"` script:
+     - `happy_path()`: PLANNING → PLAN_READY(plan) | approve → WORKING → PR_READY(pr #101)
+     - `plan_rejected_once()`: PLAN_READY(v1) | send → PLAN_READY(v2) | approve → PR_READY
+     - `pr_fix_round()`: PLAN_READY | approve → PR_READY(head "a1") | send → WORKING → PR_READY(head "b2")
+     - `fails()`: PLANNING → FAILED(error)
+     - `asks_question()`: PLANNING → NEEDS_INPUT(question) | send → PLAN_READY | approve → PR_READY
+7. **Tests:**
+   - `isinstance(FakeAdapter(), AgentAdapter)`.
+   - Each builder's full sequence, driven by the calls.
+   - Idempotent start.
+   - The registry (including duplicate and unknown names), and `caps_by_name` output.
+   - Exhausted-phase behaviour.
+   - `cancel`.
+
+   Async tests use pytest-asyncio (auto mode is configured).
+8. **Gates:** `uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q` all pass.

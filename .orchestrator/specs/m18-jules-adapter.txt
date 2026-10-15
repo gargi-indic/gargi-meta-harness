@@ -1,0 +1,40 @@
+Binding details for #18 (M1.8 Jules adapter), in addition to the issue text:
+
+1. **Files:** `harness/adapters/jules.py` and `tests/adapters/test_jules.py`. Touch nothing else. No new dependencies.
+2. **Build on main.** Implement the `AgentAdapter` protocol from `harness/adapters/base.py`, already merged: `AgentState`, `Capabilities`, `StartRequest`, `SessionRef`, `AgentSnapshot`, `PrRef`, `ActivityItem`. Use `.orchestrator/jules.py` as the behavioural reference (endpoints, activity pagination, the attention states, wait-push logic), but write async httpx code. Don't import from `.orchestrator/`.
+3. **Constructor.** `JulesAdapter(api_key: str, *, max_concurrency: int = 1, base_url: str = "https://jules.googleapis.com/v1alpha", transport: httpx.AsyncBaseTransport | None = None, clock: Callable[[], float] = time.monotonic, pr_head: Callable[[str, int], Awaitable[str]] | None = None)`.
+   - `name = "jules"`, and caps are `Capabilities(plan_approval=True, messaging=True, opens_pr=True, local_workspace=False, max_concurrency=max_concurrency)`.
+   - The key goes only in the `X-Goog-Api-Key` header. `repr()` and every error message must not contain it.
+   - Raise `JulesError(status, method, path, message)`, with the message passed through `harness.secrets.redact` and the extra value `[api_key]`.
+4. **`start(req)`:** `POST sessions` with:
+   - `title`: `f"#{req.issue}: {req.title} [h:{req.idempotency_key}]"`
+   - `prompt`: `req.brief`
+   - `sourceContext`: `{"source": f"sources/github/{req.repo}", "githubRepoContext": {"startingBranch": req.base_branch}}`
+   - `automationMode`: `"AUTO_CREATE_PR"`
+   - `requirePlanApproval`: `req.mode == "plan_first"`
+
+   Returns `SessionRef(agent="jules", id=<id>, url=<url>, data={"repo": req.repo, "last_activity_id": None})`.
+5. **`find(key)`:** page through `GET sessions?pageSize=100` (following `nextPageToken`) and match the `[h:{key}]` suffix in titles. Return the ref, or None.
+6. **`poll(ref)`:** GET the session, map its state, and return only new activities.
+   - Fetch every activity page. "New" means after `ref.data["last_activity_id"]`, which `poll` updates **in place** in `ref.data`; the engine persists `ref.data`.
+   - The plan text joins the latest `planGenerated` steps as `"- {title}: {description}"` lines. The question is the latest `agentMessaged.agentMessage`.
+   - The PR comes from `outputs[].pullRequest`, with `number` parsed from the URL. `head_sha` comes from `pr_head(repo, number)` if given, else `""`.
+   - Map each `progressUpdated`, `agentMessaged`, `planGenerated` and `sessionCompleted`/`sessionFailed` activity to an `ActivityItem` with kinds `progress`, `message`, `plan` and `end`.
+   - `poll_after` is 60 when not attention and 0 when attention.
+7. **Quirks.** Store all quirk state in `ref.data` so it survives restarts.
+   - **(a) Re-asks for approval.** Within 10 minutes (by `clock`) after `approve_plan`, a state of `AWAITING_USER_FEEDBACK` whose latest agent message matches `(?i)(look good|approve|proceed\?|shall i proceed)` gets one automatic `send("Approved, proceed.")` (record `auto_replied=True`), and `poll` reports WORKING. After that, it reports NEEDS_INPUT normally.
+   - **(b) Stale state after approve.** For 120 seconds after `approve_plan`, `AWAITING_PLAN_APPROVAL` is reported as WORKING.
+   - **(c) PR fixes.** `send()` on a session that has a PR records `fix_base_head = await pr_head(repo, n)` when `pr_head` is set. While it's set, `poll` reports PR_READY only once the head differs **and** the Jules state is no longer QUEUED, PLANNING or IN_PROGRESS. Otherwise it reports WORKING, then clears the field.
+8. **`approve_plan(ref, note=None)`:** POST `:approvePlan`, then `send(note)` if a note is given, and record `approved_at`.
+   - **`send`:** POST `:sendMessage` with `{"prompt": text}`.
+   - **`cancel`:** POST `:archive` (the cancel endpoint returns 404; archive works and frees the concurrency slot).
+9. **Tests.**
+   - Use respx with `pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True, base_url="https://jules.googleapis.com/v1alpha")`, a fake clock, and no real sleeping or network.
+   - Cover:
+     - every state row in the issue's table;
+     - activity pagination plus last-seen tracking (the second poll returns nothing new);
+     - each of the three quirks, including that the auto-reply happens only once and that it survives a new adapter instance given the same `ref.data`;
+     - `find` by title tag across 2 pages;
+     - a 4xx error without the key in the message or the repr;
+     - `isinstance(adapter, AgentAdapter)`.
+10. **Gates:** `uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q` all pass.

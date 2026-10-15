@@ -1,0 +1,126 @@
+Plan approved. The design decisions below are binding and part of the approval; they refine docs/PLAN.md where needed. Fold them in; no need to re-plan.
+
+## A. Model (`harness/playbook/models.py`, pydantic v2, `extra="forbid"` everywhere)
+
+1. **Node ids:** `^[a-z][a-z0-9_]*$`. Ids starting with `@` are reserved for terminal targets: **`@done`** ends the run successfully and **`@failed`** ends it as failed. Edge values may be a node id, `@done` or `@failed`.
+
+2. **Ports come from a method,** `def ports(self) -> tuple[str, ...]`, which every node kind implements. `exhausted` is added only when `max_visits` is set.
+
+   | Kind | Ports |
+   |---|---|
+   | `agent` `action: plan` | `plan_ready, pr_ready, needs_input, failed, timeout` |
+   | `agent` `action: implement` | `pr_ready, needs_input, failed, timeout` |
+   | `agent` `action: revise` | Has a required `expect: plan\|pr`. Ports: `plan_ready` or `pr_ready` (per `expect`), plus `needs_input, failed, timeout` |
+   | `review` | `approve, changes, escalate` |
+   | `check` | `pass, fail` |
+   | `gate` | `approved, rejected` |
+   | `branch` | its `cases[].port` values plus `default` |
+   | `parallel` | none (it fans out to `branches`) |
+   | `join` | `done, failed` |
+   | `decompose` | `created, failed` |
+   | `merge` | `merged, failed` |
+   | `escalate` | `resolved` |
+   | `notify` | `sent` |
+
+3. **Agent node fields:** `session: str`, `action`, `agent: str = "{{ issue.agent }}"`, `expect` (revise only; required there, forbidden otherwise), `message: str | None` (required for revise), `prompt: str | None`, `timeout: Duration | None`. The other node fields are as in the issue.
+
+4. **`Duration`:** a string matching `^\d+[smh]$`, with a helper `duration_seconds(s) -> int`. `Limits = {budget_usd: float | None, timeout: Duration | None}`.
+
+5. **`GateMode`:** `Literal["human", "auto"] | AutoIf`, where `AutoIf = {auto_if: str}`.
+
+6. **Correction convention** (document it in the module docstring): every outcome that can route into a `revise` node puts a human-readable `correction: str` in its output. That covers review `changes`, check `fail` and gate `rejected` (the note). Revise messages then use `{{ prev.correction }}`, where `prev` (the output of the node that routed here) is added to the template context in #12. Don't implement templating here.
+
+## B. Validator (`harness/playbook/validate.py`)
+
+- Return type: `list[PlaybookIssue]`, where `PlaybookIssue(path: str, code: str, message: str)`. Don't call it `Issue`; that collides with GitHub issues.
+- **Error codes:**
+
+  | Code | Meaning |
+  |---|---|
+  | `bad_edge_key` | malformed key |
+  | `unknown_node` | edge key references a missing node |
+  | `bad_port` | port not in `node.ports()`; for a wildcard, not a port of any node |
+  | `bad_target` | target is not a node or `@done`/`@failed` |
+  | `unrouted_port` | |
+  | `unreachable` | |
+  | `unbounded_cycle` | |
+  | `unknown_gate` | |
+  | `missing_message` | |
+  | `capability` | |
+  | `unknown_branch` | a `parallel` branch or `join` input is not a node |
+
+- **Resolving a route** for `(node, port)`: the explicit `node.port` edge, else `*.port`.
+- **The graph** used for reachability and cycles: the resolved routes, plus `parallel` → each branch. The entry is the first node in `nodes` order.
+- **Cycles:** every node that lies on a cycle (any strongly connected component of size > 1, or a self-loop) must have `max_visits`. Use iterative Tarjan or Kosaraju; no recursion.
+- **Capability check:** for literal agent names only, using `agent_caps[name]`. `action: plan` needs `"plan"`, and `action: revise` needs `"message"`.
+
+## C. Loader and packaging
+
+- Built-in playbooks live **inside the package** at `harness/playbooks/*.yaml` (not a top-level `playbooks/`), so they ship in the wheel automatically. `builtin_playbooks()` reads them via `importlib.resources`.
+- `load_playbook(text)` raises `PlaybookError` (with the pydantic or YAML message) on invalid input. `load_file(path)` reads a file and parses it with `load_playbook`.
+
+## D. The shipped `harness/playbooks/plan-build-review.yaml` (use exactly this)
+```yaml
+apiVersion: harness/v1
+id: plan-build-review
+name: Plan, build, review, merge
+description: One agent session plans, implements and fixes; a reviewer checks the plan and the PR; CI and scope checks gate the review; a human approves the merge.
+gates:
+  plan: auto
+  merge: human
+limits:
+  budget_usd: 20
+  timeout: 6h
+nodes:
+  plan:        {kind: agent, session: main, action: plan, agent: "{{ issue.agent }}"}
+  plan_review: {kind: review, target: plan, checklist: [scope, acceptance, decisions, existing-code], max_visits: 4}
+  revise_plan: {kind: agent, session: main, action: revise, expect: plan, message: "{{ prev.correction }}", max_visits: 3}
+  plan_gate:   {kind: gate, gate: plan, max_visits: 3}
+  implement:   {kind: agent, session: main, action: implement}
+  ci:          {kind: check, check: ci, max_visits: 5}
+  scope:       {kind: check, check: scope, max_visits: 5}
+  pr_review:   {kind: review, target: pr, checklist: [acceptance, scope, plan-match, pinned-versions], max_visits: 4}
+  fix:         {kind: agent, session: main, action: revise, expect: pr, message: "{{ prev.correction }}", max_visits: 3}
+  merge_gate:  {kind: gate, gate: merge, max_visits: 3}
+  merge:       {kind: merge, method: squash}
+  escalate:    {kind: escalate}
+edges:
+  plan.plan_ready: plan_review
+  plan.pr_ready: ci
+  plan_review.approve: plan_gate
+  plan_review.changes: revise_plan
+  revise_plan.plan_ready: plan_review
+  plan_gate.approved: implement
+  plan_gate.rejected: revise_plan
+  implement.pr_ready: ci
+  ci.pass: scope
+  ci.fail: fix
+  scope.pass: pr_review
+  scope.fail: fix
+  pr_review.approve: merge_gate
+  pr_review.changes: fix
+  fix.pr_ready: ci
+  merge_gate.approved: merge
+  merge_gate.rejected: fix
+  merge.merged: "@done"
+  escalate.resolved: "@done"
+  "*.escalate": escalate
+  "*.exhausted": escalate
+  "*.failed": escalate
+  "*.needs_input": escalate
+  "*.timeout": escalate
+```
+It must validate with **zero** issues. Also add a test that removing `max_visits` from `fix` produces `unbounded_cycle`.
+
+## E. Schema and CLI
+- `playbook_json_schema()` returns `Playbook.model_json_schema()`, with the `kind` discriminator visible as `oneOf` + `discriminator`.
+- CLI: a typer sub-app `playbook`, mounted with `app.add_typer(playbook_app, name="playbook")` in `harness/cli.py`. Don't touch the existing commands.
+  - `harness playbook validate <file>` prints `path: code: message` per issue and exits 1 if any are found. Otherwise it prints `ok: <id> (<n> nodes)`.
+  - `harness playbook schema` prints indented JSON.
+  - `harness playbook list` prints the built-in ids.
+
+## F. Tests
+- Put them in `tests/playbook/` with an `__init__.py`. Use small inline YAML fixtures for each error code, the shipped playbook validating cleanly, the per-action port sets, `exhausted` appearing only with `max_visits`, terminal targets, wildcard resolution, the SCC cycle rule (including a self-loop), a branch node with custom ports, parallel/join reachability, a duration parse error, and the CLI commands (CliRunner).
+- No new dependencies; pyproject.toml and uv.lock stay unchanged.
+
+Final message: paste the raw output of ruff check, ruff format --check and `pytest -q --durations=5`.

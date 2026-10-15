@@ -1,0 +1,28 @@
+Binding details for #12 (M1.2 templating), in addition to the issue text:
+
+1. **Files:** `harness/playbook/templating.py` and `tests/playbook/test_templating.py`. Touch nothing else. No new dependencies (jinja2 is already a runtime dependency).
+2. **Context** (pydantic v2; nested models use `extra="forbid"`):
+   - `IssueCtx(number: int, title: str, body: str = "", labels: list[str] = [], agent: str, playbook: str | None = None)`
+   - `PrCtx(number: int, url: str, head_sha: str = "", changed_files: int = 0, additions: int = 0, deletions: int = 0)`
+   - `RunCtx(id: str, visits: dict[str, int] = {})`
+   - `Context(issue: IssueCtx, pr: PrCtx | None = None, inputs: dict = {}, nodes: dict[str, dict] = {}, prev: dict | None = None, run: RunCtx)`
+   - **`prev`** is the output of the node that routed into the current node. It's required by the playbook convention from #11: revise messages use `{{ prev.correction }}`.
+   - Use `default_factory` for every mutable default.
+3. **Template namespace** (`Context.namespace() -> dict`): `issue`, `pr`, `inputs`, `nodes`, `prev`, `run`, plus every key of `nodes`, so that `plan_review.correction` works.
+   - A node id that collides with a reserved name (`issue`, `pr`, `inputs`, `nodes`, `prev`, `run`) is reachable **only** through `nodes.<id>`. Test this.
+   - Pydantic sub-models are exposed as plain dicts (`model_dump()`), so attribute access works through Jinja's getattr/getitem fallback.
+4. **Environment:** a single module-level factory `_env()` returning `jinja2.sandbox.ImmutableSandboxedEnvironment(undefined=StrictUndefined, autoescape=False, keep_trailing_newline=True)`. Remove all globals except `range`, `dict`, `lists` and `true`/`false`/`none`, and keep only Jinja's built-in filters, which already include `default`.
+5. **`render(template: str, ctx: Context, *, path: str = "") -> str`:** wraps every `jinja2.TemplateError` and `SecurityError` (`TemplateSyntaxError`, `UndefinedError`, `SecurityError`) in `TemplateError(path, message)`, where `TemplateError` is our own exception class with `.path` and `.message`. Never let a raw jinja2 exception escape.
+6. **`evaluate(expr: str, ctx: Context, *, path: str = "") -> bool`:**
+   - Strip one optional surrounding `{{ ... }}`, then compile it with `env.compile_expression(expr, undefined_to_none=False)`.
+   - The result must be a real `bool`; otherwise raise `TemplateError(path, "condition must evaluate to a boolean, got <type>")`.
+   - Undefined names raise `TemplateError`.
+7. **`template_variables(template: str) -> set[str]`:** uses `jinja2.meta.find_undeclared_variables` on the parsed template. The editor and validator can use it later; just test that it works.
+8. **Tests:**
+   - Rendering issue fields, `nodes.x.y`, top-level `x.y`, `prev.correction`, `pr` None handling (`{% if pr %}`), and the `default` filter.
+   - Undefined → `TemplateError` with `path` set.
+   - Sandbox escapes all raise `TemplateError`: `{{ ''.__class__ }}`, `{{ ().__class__.__bases__ }}`, `{{ cycler.__init__ }}`.
+   - `evaluate`: true/false, `{{ }}`-wrapped, a non-bool raises, an undefined raises, a comparison (`pr.additions < 200 and prev.verdict == 'approve'`).
+   - The reserved-name collision.
+   - Rendering the actual `{{ prev.correction }}` and `{{ issue.agent }}` strings used by the shipped `plan-build-review.yaml`.
+9. **Gates:** `uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q` all pass.

@@ -1,0 +1,166 @@
+Binding details for #14 (M1.4 engine runner). These are part of the plan approval and override the issue where they differ. Build on what is merged on main and do not re-implement it:
+- `harness/store/{db,repo}.py`: `Store`, `tx()` (re-entrant), `now()`, `RunRow`/`StepRow`/`GateRow`, `insert_*`/`update_*`/`get_run`/`list_runs`/`steps_for_run`/`active_steps`/`append_event`;
+- `harness/github/outbox.py`: `Outbox.enqueue(op, payload, coalesce_key)`;
+- `harness/github/ledger.py`: `render_ledger` and `render_event`;
+- `harness/github/control_table.py`: `ControlRow`;
+- `harness/playbook/models.py`: `Playbook`, nodes, `node.ports()`, the terminals `@done`/`@failed`, and the correction convention;
+- `harness/playbook/templating.py`: `Context`, `render`, `evaluate`, including `prev`;
+- `harness/adapters/base.py`: `AdapterRegistry`.
+
+## 1. Files
+- `harness/engine/model.py`
+- `harness/engine/executors/__init__.py` and `harness/engine/executors/base.py`
+- `harness/engine/runner.py`
+- `tests/engine/` (with `__init__.py`)
+
+Touch nothing else, add no new dependencies, and leave pyproject.toml unchanged.
+
+## 2. IDs (deterministic, which is what makes restarts idempotent)
+- Run id: `f"{repo}#{issue}@{n}"`, where n is 1 + the number of runs that already exist for that issue.
+- Step id: `f"{run_id}/{node_id}/{visit}"`, with visit counting from 1. The UNIQUE `(run_id, node_id, visit)` constraint stops duplicates.
+- Gate id: `f"{step_id}/gate"`.
+
+## 3. Executors (`executors/base.py`)
+```python
+@dataclass
+class Waiting:
+    ref: dict | None = None
+    poll_after: float = 60.0
+    output: dict | None = None
+
+@dataclass
+class Done:
+    outcome: str
+    output: dict = field(default_factory=dict)
+
+class Executor(Protocol):
+    async def advance(self, step: StepRow, node: Node, ctx: ExecContext) -> Waiting | Done: ...
+```
+
+`ExecContext` is a dataclass with these fields: `store`, `outbox`, `gh` (GitHub | None), `adapters` (AdapterRegistry), `repo_config` (RepoConfig), `playbook`, `run` (RunRow), `template` (templating.Context), `clock` (a `Callable[[], float]` in seconds), and `crash` (the crash hook, see §6).
+
+`ExecutorRegistry`:
+- `register(kind, executor)`;
+- `get(kind)`, which raises `KeyError`;
+- `kinds()`.
+
+Executors must be idempotent:
+- `advance` may be called again with the same step after a crash.
+- The `ref` an executor returned last time is in `step.ref`. Use it to resume, never to restart.
+
+## 4. Runner (`runner.py`)
+Signature: `Runner(store, outbox, executors, adapters, *, gh=None, repo_configs: dict[str, RepoConfig] | None = None, clock=time.time, crash_after: str | None = None)`.
+
+**`start_run(repo, issue: IssueRow, playbook: Playbook, *, playbook_sha=None, inputs=None, agent: str | None = None) -> str`**
+- Refuses with `RunExists` if a non-terminal run already exists for that issue.
+- Inserts the run with status `running`. `context` holds `{inputs, agent, visits: {}, sessions: {}, nodes: {}}`.
+- Inserts the first step: the entry node, which is the first node in `nodes` order, at visit 1, with status `pending`.
+- Appends a `run_started` event and mirrors (§7).
+
+**`async tick() -> int`**
+- For every step that is `pending`, or `waiting` with `poll_after <= now`, in `active_steps` order plus pending ones, ordered by id: build the template `Context` and call the executor.
+- Skip runs that are paused or terminal.
+- Returns the number of steps advanced.
+- The step `poll_after` column stores an ISO timestamp computed from `clock()`, formatted like `Store.now()`. Inject `clock` so tests can move time.
+
+**`advance` handling**
+- `Waiting`: set status `waiting`, store `ref`, `poll_after` and any `output`.
+- `Done`:
+  - Set the step to `done` with its outcome and output.
+  - Store `run.context.nodes[node_id] = output`; this is the latest output per node.
+  - Then route.
+- An exception from an executor counts as `Done("failed", {"error": f"{type(e).__name__}: {e}", "correction": ...})`. Pass the message through `harness.secrets.redact`, and record an `executor_error` event.
+
+**Routing** of the outcome from `node_id`:
+1. Use the explicit `edges[f"{node_id}.{outcome}"]`, otherwise `edges[f"*.{outcome}"]`.
+2. If there is no route, the run status becomes `failed` with event `no_route` (`data={"node", "outcome"}`).
+3. If the target is `@done` or `@failed`, the run status becomes `done` or `failed`.
+4. Otherwise compute the target's next visit as `visits.get(target, 0) + 1`.
+   - If the target has `max_visits` and the next visit would exceed it, route the **target's** `exhausted` port instead, recursively (cap the recursion at 10 hops, then fail with `routing_loop`).
+   - Otherwise increment the visit count, insert the new step as `pending`, and set `context.prev_for[target_step_id] = output of the step that routed here`. That value is what templating exposes as `prev`.
+
+**Parallel and join**
+- A `parallel` node is handled by the runner itself, not by an executor: on entry it creates one pending step per branch, each with `prev` = parallel's prev, and the parallel step itself becomes `done`.
+- `join` is executed by a built-in `JoinExecutor` inside `runner.py`:
+  - `mode: all` → `done` once every input node has a done step at its latest visit; `failed` if any of them failed.
+  - `mode: any` → `done` as soon as one has.
+  - `mode: select` → raises `NotImplementedError` (that's M3).
+  - Its output is `{"inputs": {node: output}}`.
+
+**Run controls**
+- `pause(run_id)` and `resume(run_id, to: str | None = None)`. With `to`, it inserts a new pending step for that node; this is how `escalate` gets resolved later, in #15/#16.
+- `cancel(run_id)` cancels the run and calls `adapters.get(agent).cancel(ref)` for every waiting agent step whose ref has `agent` and `id` (best effort, with errors logged as events).
+- `retry_node(run_id, node_id)` inserts a new visit of the node as pending; it obeys `max_visits` and raises `ValueError` past it.
+
+**Run status values:** `running`, `needs-you`, `paused`, `done`, `failed`, `cancelled`.
+- An executor can request `needs-you` by returning `Waiting(output={"needs_you": True})`. The gate and escalate executors in #15/#16 will use this.
+- `needs-you` reverts to `running` when no waiting step requests it any more.
+
+## 5. Template context
+`templating.Context` is built from:
+- `issue`: the cached `IssueRow`, with `agent` = the run's agent, else the `agent:<x>` label, else `repo_config.default_agent`;
+- `pr`: from `run.context.get("pr")`, which the agent executors will set later;
+- `inputs`;
+- `nodes`: `run.context.nodes`;
+- `prev`: `run.context.prev_for.get(step.id)`;
+- `run`: id and visits.
+
+## 6. Crash safety
+- `crash_after` names the point at which to raise `SimulatedCrash`. The points are `before_advance`, `after_advance`, `after_step_update`, `after_route` and `after_mirror`.
+- Each runner step transition happens inside one `store.tx()`, so a crash anywhere leaves either the old state or the new state, never a mix.
+- Recovery means a new `Runner` on the same Store, calling `tick()` until terminal.
+- **Rehydrate** (§8) also rebuilds the store from a ledger snapshot alone, for the case where the local DB is lost.
+
+Required test: for **every** crash point, crash once, then run a fresh Runner to completion with `FakeAdapter.happy_path()`. Assert that:
+- `start` was called exactly once per session slot;
+- exactly one PR (#101) is seen;
+- the run ends `done`;
+- no duplicate step ids exist.
+
+For this test, register a minimal **test-only** agent executor in `tests/engine/` that uses FakeAdapter: `find`/`start` by idempotency key `f"{run_id}/{session}"`, poll, `approve_plan` on implement. It is a stub; the real executor is #15.
+
+## 7. Mirroring to GitHub (through the outbox only, never direct)
+Mirroring happens after every step transition, when the run has a `repo` and the outbox is set.
+
+**Ledger:** `outbox.enqueue("upsert_ledger", {repo, issue, body: render_ledger(snapshot, summary_md)}, coalesce_key=f"ledger:{repo}#{issue}")`.
+- `summary_md` is a short status table: run id, playbook, status, current node(s), visits, PR.
+
+**Labels:** only when the run status changed. Use `set_labels` with `add=[label]` and `remove=[the other harness:* status labels]`, mapping run status to label as follows:
+
+| Run status | Label |
+|---|---|
+| running | `harness:running` |
+| needs-you | `harness:needs-you` |
+| paused | `harness:blocked` |
+| done | `harness:done` |
+| failed | `harness:failed` |
+| cancelled | `harness:failed` |
+
+**Control table:** when `repo_config.control_issue` is set, `edit_issue_body` with `ControlRow(issue, title, status, agent, run_id, pr, note)`, coalesce key `f"control:{repo}#{issue}"`. Map the control status the same way, except that a run waiting on a review node shows `review`.
+
+**Event comments** (`add_comment` with `render_event`, **no** coalescing) go out only for: `run_started`, step done for an agent node (`plan_ready` / `pr_ready`), `review` verdicts, entering a gate that requests needs-you, run `done`, run `failed`, `no_route`, `executor_error`, and `cancelled`. **Never** comment on plain waiting polls.
+
+## 8. Snapshot (`model.py`)
+- `RunSnapshot` (pydantic) is `to_snapshot(store, run_id) -> dict` with fields `{v: 1, run: {...}, steps: [...], visits, prev_for, nodes, sessions}`.
+- Each step's output is capped at 8 KB when serialized. Larger outputs become `{"truncated": true, "keys": [...]}`; the full output stays in the local store.
+- `rehydrate(store, snapshot)` inserts the run and steps into an empty store, idempotently: rows that already exist are left alone.
+- Test: snapshot → empty store → rehydrate → snapshot again gives an equal result, apart from truncation. A 30-step run with large outputs must stay under 60,000 chars once rendered by `render_ledger`.
+
+## 9. Tests (`tests/engine/`)
+Use an inline mini-playbook built with the real models, stub executors that return scripted `Done`/`Waiting` values, FakeAdapter, an in-memory Store, a fake clock, and an Outbox constructed against a respx-mocked GitHub (or a fake object that just records enqueues; prefer a real Outbox over the store, without draining). Cover:
+- explicit vs wildcard routing;
+- the terminals;
+- `exhausted` when `max_visits` is hit;
+- `no_route`;
+- an executor exception becoming `failed`;
+- `prev` being passed to the next step;
+- parallel → join `all` and `any`;
+- pause, resume with `to=`, cancel calling adapter cancel, and `retry_node`;
+- `needs-you` status;
+- mirroring enqueues (one coalesced ledger, label changes only on status change, no comment on polls);
+- `RunExists`;
+- the crash matrix (§6);
+- the snapshot round-trip (§8).
+
+## 10. Gates
+`uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q --durations=5` all pass, with no test slower than 1s. Paste the raw output in your final message.
