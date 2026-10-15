@@ -1,0 +1,62 @@
+Binding details for #20 (M1.10 merge executor). These override the issue where they differ. Build on what is merged on main and do not re-implement it:
+- `harness/engine/executors/base.py`: `Waiting`, `Done`, `ExecContext` (`ctx.gh`, `ctx.outbox`, `ctx.store`, `ctx.repo_config`, `ctx.run`, `ctx.playbook`, `ctx.template`, `ctx.clock`);
+- `harness/github/outbox.py`: `Outbox.enqueue(op, payload, coalesce_key)`, `_PAYLOAD_MODELS`, `_process_op`;
+- `harness/github/client.py`: `GitHub.pull`, `issue`, `update_issue`;
+- `harness/github/ledger.py`: `render_event`;
+- `harness/playbook/models.py`: `MergeNode` (`method`, ports `merged`/`failed`).
+
+## 1. Files
+- `harness/engine/executors/merge.py` (new)
+- `harness/github/outbox.py`: add exactly one op, `tick_boxes` (below). No other changes there.
+- `tests/engine/test_merge.py` (new), plus new tests for `tick_boxes` appended to `tests/github/test_outbox.py`.
+Touch nothing else. No new dependencies.
+
+## 2. New outbox op `tick_boxes`
+- `TickBoxesPayload(OutboxPayload)`: `issue: int`. Add `"tick_boxes"` to `OpType` and `_PAYLOAD_MODELS`.
+- `_process_op`: fetch the issue fresh (`gh.issue`), replace every unchecked task box at line start, regex `(?m)^(\s*[-*+] )\[ \]` → `\1[x]`, and `update_issue(body=...)` **only if** the body changed. Everything else in the body stays byte-for-byte identical (including `\r\n` line endings).
+- Public helper `tick_boxes(body: str) -> str` in `outbox.py` so it can be unit-tested.
+
+## 3. `MergeExecutor.advance(step, node, ctx)`
+Inputs: `pr_no = ctx.run.context["pr"]["number"]` (missing → `Done("failed", {"note": "no PR in run context"})`). `repo = ctx.run.repo`. If `ctx.gh` or `ctx.outbox` is None, raise `RuntimeError`.
+
+Phase is kept in `step.ref["phase"]` (`None` on first call):
+
+**A. first call (no ref)**
+1. `pull = gh.pull(repo, pr_no)`. If `pull["merged"]` → go to **C** (idempotency guard: no merge call).
+2. If `pull["state"] == "closed"` → `Done("failed", {"note": "PR closed without merge"})`.
+3. Reviewed sha: collect `head_sha` from every `ctx.template.nodes[<id>]` output where the node is a `check` node or a `review` node with `target == "pr"` and the output has `head_sha`. If none → `Done("failed", {"note": "no reviewed head sha"})`. If any differs from `pull["head"]["sha"]` → `Done("failed", {"note": "head changed since review", "head_sha": <current>, "reviewed": [...]})`.
+4. `pull["mergeable"] is None` (GitHub still computing) → `Waiting(ref=None, poll_after=10)`. `False` → `Done("failed", {"note": "not mergeable: <mergeable_state>", "head_sha"})`.
+5. Enqueue `merge_pull` with `{repo, number, method: node.method or ctx.repo_config.merge.method, sha: head}` and `coalesce_key=f"merge:{repo}#{pr_no}"`. Return `Waiting(ref={"phase": "merging", "outbox_id": <id>, "sha": head}, poll_after=15)`.
+
+**B. phase `merging`**
+1. `pull = gh.pull(...)`; if merged → **C**.
+2. Read the outbox row `step.ref["outbox_id"]` from `ctx.store`. If its status is `failed` → `Done("failed", {"note": f"merge failed: {last_error}"})` (already redacted by the outbox).
+3. Otherwise `Waiting(ref=step.ref, poll_after=15)`.
+
+**C. finalize (merged)**; every enqueue uses a coalesce key so a re-run after a crash doesn't duplicate pending writes:
+1. If `ctx.repo_config.merge.delete_branch` and `pull["head"]["repo"]["full_name"] == repo`: `delete_branch` (`branch=pull["head"]["ref"]`, key `f"delete_branch:{repo}:{branch}"`). Branch deletion is only enqueued **after** the merge is observed, never before.
+2. `tick_boxes` for `ctx.run.issue` (key `f"tick:{repo}#{issue}"`).
+3. `close_issue` for the issue if `gh.issue(repo, issue)["state"] != "closed"` (key `f"close:{repo}#{issue}"`).
+4. `add_comment` with `render_event(<today>, issue, "merged", [f"PR #{pr_no} merged as `{sha7}`", ...])` (key `f"merged:{repo}#{issue}"`).
+5. `Done("merged", {"pr": pr_no, "merge_sha": pull["merge_commit_sha"], "head_sha": pull["head"]["sha"]})`.
+
+Labels and the control-table row are written by the runner's mirroring when the run reaches `@done` (`harness:done`, row `done` with the PR). The merge executor must **not** enqueue `set_labels` or `edit_issue_body` itself.
+
+All GitHub writes go through the outbox. The executor itself only performs reads (`pull`, `issue`).
+
+## 4. Tests
+respx with `pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True)` where it fits, `GitHub(..., write_spacing=0.0)` with an injected sleep, an in-memory Store, a real `Outbox` (drain with `drain_once()` where the test needs the writes to happen), and a fake clock. No real network or sleeps. Cover:
+1. happy path: A enqueues merge with the right method/sha → drain → B sees merged → C enqueues delete_branch, tick_boxes, close_issue, the event comment → drain → respx asserts PUT merge (with sha), DELETE ref, PATCH body (ticked), PATCH state closed, POST comment;
+2. already merged on first call: no merge PUT at all;
+3. head moved since review → `failed` "head changed since review", nothing enqueued;
+4. `mergeable: false` → `failed` with a note; `mergeable: null` → Waiting;
+5. merge op fails in the outbox (405 five times, or mark the row failed) → `failed` with the error note;
+6. `tick_boxes`: ticks `- [ ]`, `* [ ]`, indented boxes; leaves `- [x]`, inline `[ ]` mid-line, code and other text intact; preserves `\r\n`; no PATCH when nothing to tick;
+7. fork PR (head repo differs) → no delete_branch; `delete_branch: false` config → no delete_branch;
+8. issue already closed → no close_issue enqueued.
+
+## 5. Gates
+`uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q` all pass. No test slower than 1s.
+
+## Do not add
+No changes to the runner, models, client or config. No executor registration wiring (#21). No rebase/conflict requests to agents (M3).

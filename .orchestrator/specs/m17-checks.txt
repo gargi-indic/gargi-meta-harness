@@ -1,0 +1,70 @@
+Binding details for #17 (M1.7 check executors). These override the issue where they differ. Build on what is merged on main and do not re-implement it:
+- `harness/engine/executors/base.py`: `Waiting`, `Done`, `ExecContext` (`ctx.gh`, `ctx.repo_config`, `ctx.run`, `ctx.clock`, `ctx.template`), the `Executor` protocol `advance(step, node, ctx)`;
+- `harness/github/client.py`: `GitHub.pull`, `pull_files`, `check_runs`, `combined_status`, `get`, `GitHubError(.status)`;
+- `harness/config.py`: `RepoConfig.protected_paths`;
+- `harness/playbook/models.py`: `CheckNode` (ports `pass`/`fail`) and the correction convention (every outcome that routes to a revise node carries `output["correction"]: str`).
+
+## 1. Files
+- `harness/engine/executors/check.py`
+- `tests/engine/test_check.py`
+Touch nothing else. No new dependencies.
+
+## 2. Public API
+```python
+class CheckExecutor:
+    def __init__(self, *, no_ci_timeout: float = 600.0, poll: float = 60.0) -> None: ...
+    async def advance(self, step: StepRow, node: CheckNode, ctx: ExecContext) -> Waiting | Done: ...
+```
+It dispatches on `node.check` to private coroutines `_ci`, `_scope`, `_pinned`, `_command`.
+
+## 3. Which PR
+- The PR number comes from `ctx.run.context["pr"]["number"]` (set by the agent executor on `pr_ready`). If missing, `Done("fail", {"error": "no PR in run context", "correction": "..."})`.
+- Always re-read the PR with `gh.pull(repo, n)` and use `pull["head"]["sha"]` (do not trust the cached sha). Every output (pass or fail) contains `head_sha` — the merge executor (#20) compares it.
+- If `ctx.gh` is None, raise `RuntimeError("check executors need a GitHub client")` (the runner turns it into `failed`).
+
+## 4. `ci`
+- Read `check_runs(repo, sha)` and `combined_status(repo, sha)`.
+- Pending: any check run with `status != "completed"`, or any combined-status entry (`statuses[]`) with `state == "pending"`. Return `Waiting(ref={"sha": sha, "since": <since>}, poll_after=self.poll)`.
+- `since`: keep `step.ref["since"]` if `step.ref` exists and `step.ref["sha"] == sha`; otherwise `ctx.clock()` (a new head resets the clock).
+- Zero check runs and zero statuses: if `ctx.clock() - since >= no_ci_timeout` → `Done("fail", {"head_sha", "failed": [], "note": "no CI reported", "correction": "No CI reported for <sha7> within 10 minutes. ..."})`; else Waiting as above.
+- Pass when every check run's `conclusion` is in {success, neutral, skipped} and every status `state == "success"` → `Done("pass", {"head_sha": sha, "checks": <count>})`.
+- Otherwise `Done("fail", {"head_sha", "failed": [{"name", "conclusion", "url"}], "correction"})`. For check runs use `name`, `conclusion`, `html_url`; for statuses use `context`, `state`, `target_url`. The correction is a numbered list: "CI failed on <sha7>. Fix these checks and push to the same branch:\n1. <name>: <conclusion> (<url>)".
+- Cap `failed` at 20 entries.
+
+## 5. `scope`
+- `pull_files(repo, n)`; a violation is any `filename` (or `previous_filename` for renames) that starts with a `protected_paths` entry. Normalise entries: an entry without a trailing `/` matches the exact path or `entry + "/"` prefix.
+- Pass: `Done("pass", {"head_sha", "files": <count>})`. Fail: `Done("fail", {"head_sha", "violations": [paths], "correction": "These files are protected and must not be changed: ... Revert them on the same branch."})`.
+
+## 6. `pinned_versions`
+- From `pull_files`, only files with a `patch`. Scan only **added** lines (start with `+`, not `+++`).
+- Workflows: files matching `.github/workflows/*.yml` or `*.yaml`. Regex for `uses:` lines: `^\+\s*-?\s*uses:\s*["']?([^"'\s#]+)`. Skip local (`./...`) and `docker://` refs. Split `owner/repo[/path]@ref`.
+  - `ref` in {main, master, latest} (case-insensitive) or missing `@` → problem `{"file", "line": <text>, "problem": "unpinned ref"}`.
+  - 40-hex sha → ok, no network.
+  - Otherwise `GET repos/{owner}/{repo}/git/ref/tags/{ref}` via `gh.get`; `GitHubError` with status 404 → problem "tag not found". Other errors propagate.
+  - Cache lookups per `(owner/repo, ref)` within one advance call.
+- Images: files whose basename is `Dockerfile`, starts with `Dockerfile.`, ends with `.dockerfile`, or is `docker-compose*.yml|yaml` / `compose*.yml|yaml`. Added lines matching `FROM <image>` or `image: <image>`: an image with tag `latest` or no tag at all (no `:` after the last `/`, and no `@sha256:`) is a problem "unpinned image". `FROM scratch` and build-stage aliases (`FROM base` where `base` was defined via `AS base` earlier in the same patch) are ok.
+- Pass: `Done("pass", {"head_sha", "problems": []})`. Fail: `Done("fail", {"head_sha", "problems": [...], "correction": numbered list})`. Cap at 20 problems.
+
+## 7. `command`
+`Done("fail", {"note": "command checks need a local workspace (M3)", "correction": "..."})`. No network.
+
+## 8. Outputs
+Small JSON only (no patches, no raw API payloads). Every `fail` output has a non-empty `correction` string.
+
+## 9. Tests (`tests/engine/test_check.py`)
+Use respx with `pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True)` (or per-test equivalents), `GitHub(..., write_spacing=0.0)` with injected sleep, a fake clock, and a minimal `ExecContext` (in-memory Store, `run.context["pr"] = {"number": 7, ...}`). No real network, no real sleeps. Cover:
+1. ci: pending → Waiting (ref has sha/since) → second advance passes;
+2. ci: failure with details (check run failure + failing status) and a correction;
+3. ci: zero checks → Waiting before 600s, `fail` "no CI reported" after; a new head sha resets `since`;
+4. ci: neutral/skipped count as pass;
+5. scope: protected-path violation (including a rename from a protected path); a clean PR passes;
+6. pinned: a missing action tag (404) fails; an existing tag passes; `@main` fails without a network call; a 40-char sha passes without a network call; a removed (`-`) `uses: x@main` line is ignored;
+7. pinned: `FROM python:latest`, `image: redis` (no tag) fail; `FROM python:3.12-slim`, `FROM x@sha256:...`, `FROM scratch`, stage alias pass;
+8. command → fail with the M3 note;
+9. no PR in context → fail.
+
+## 10. Gates
+`uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q` all pass. No test slower than 1s.
+
+## Do not add
+No changes to the runner, models, client, outbox or config. No executor registration wiring (that's #21). No `command` execution.
