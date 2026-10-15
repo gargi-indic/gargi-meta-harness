@@ -39,6 +39,8 @@ Run these from the repo root after `source ~/.config/jules/env`. `jules.py` targ
 | `... wait-reply <session> [secs]` | After `message`: block until Jules replies with a message or plan |
 | `... wait-push <session> <pr> [secs]` | After requesting PR fixes: block until the PR head changes and Jules is idle |
 
+Helpers in `.orchestrator/tools/`: `log.py` edits #1's tables, `tick.sh <n>` ticks the boxes and closes the issue, and `acts.py` pretty-prints activities. Binding specs sent with plan approvals are kept in `.orchestrator/specs/`.
+
 Run waits with `run_in_background` (they take 5–35 min) and react when they finish. Never poll in a tight loop.
 
 ## 2. Per-task loop
