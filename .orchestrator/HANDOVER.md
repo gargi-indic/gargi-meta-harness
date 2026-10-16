@@ -39,27 +39,29 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | Built by Jules via this orchestrator (one session at a time); the orchestrator merges after review | human |
 | 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
-## State (handover 2026-10-15, first orchestrator: Claude Opus 5.5)
-- **M0 is complete** (#3–#9). In M1, these are merged: #11 `5e7055d`, #12 `67cddf4` (Sonnet), #13 `80b90ac` (Sonnet), #18 `378d76f` (Sonnet). Suite: 337 tests.
-- **Active:** #14 (M1.4 engine runner), Jules session `18193645226373843116`. Plan v1 was approved together with the full binding spec in `.orchestrator/specs/m14-engine.txt`. Jules was implementing at handover.
-- **Resume step:** `python3 .orchestrator/jules.py get 18193645226373843116`.
-  - If it's still in progress, wait.
-  - If it's COMPLETED, review the PR against the issue and `specs/m14-engine.txt`; this is the most important review in M1. Run a Sonnet first-pass review plus your own probes, and check the crash matrix especially.
-  - If it's stuck or FAILED, hand it to a Sonnet subagent.
-- **After #14:** #15, #16, #17, #19 and #20 all depend only on #14 (and earlier merged work). Run them **two at a time**, one with Jules and one with a Sonnet subagent, on non-overlapping files. Each gets a binding spec written first; `specs/` has the pattern.
-  - They must register executors per the engine's `Executor` protocol: `advance(step, node, ctx) -> Waiting | Done`.
-  - They must honour the **correction convention**: outcomes that route to a revise node carry `output.correction`, and revise messages use `{{ prev.correction }}`.
-  - Gates and escalate request needs-you via `Waiting(output={"needs_you": True})`.
-- #21 comes last; it wires everything together and adds the runbook. Then close epic #10 and post the M1 summary on #1. The human asked for M1 to run end to end without asking them.
-- **Policies in force:**
-  - At most one Jules session plus one Sonnet task at a time.
-  - Archive every Jules session after merge or handoff.
-  - Sonnet subagents implement in a `git worktree` from the local repo, never a fresh clone, because the **disk is nearly full** (about 0.5–1.4 GB free; the space is held outside our scratch). Remove worktrees afterwards.
-  - Review everything Sonnet writes yourself; for Jules PRs, use a Sonnet first pass and then verify its key findings.
-- **Helpers** (moved out of the scratchpad), all under `.orchestrator/tools/`:
-  - `log.py row <issue> <emoji> [session] [pr]` and `log.py current <active> <session> <pr> <next>` edit #1's tables via REST.
-  - `tick.sh <issue>` ticks the boxes and closes the issue.
-  - `acts.py` pretty-prints `jules.py activities` output: `python3 .orchestrator/jules.py activities <s> 2 | python3 .orchestrator/tools/acts.py`.
+## State (handover 2026-10-15, end of the first session)
+**Done:**
+- M0 is complete (#3–#9; epic #2 closed).
+- M1 merged so far: #11 `5e7055d`, #12 `67cddf4`, #13 `80b90ac`, #18 `378d76f`. Suite: 337 tests on `main`.
+
+**#14 (engine runner) is NOT started in code.**
+- Jules asked for help three times without pushing anything. Its session `18193645226373843116` was told to stop and was archived; if it still shows IN_PROGRESS, archive it again with `jules.py archive`. Ignore any branch or PR it might still produce.
+- No branch exists. The next step is to **give #14 to a Sonnet subagent, implementing from `main`**, with the binding spec `.orchestrator/specs/m14-engine.txt` **plus** `.orchestrator/specs/m14-engine-addendum.txt`.
+- Then review the PR yourself. This is the most important review in M1: probe the crash matrix, routing, `prev`, and the mirroring enqueues.
+
+**Ready specs for the next tasks** (all in `.orchestrator/specs/`): `m15-agent-executors.txt`, `m17-checks.txt` and `m20-merge.txt` (#20 adds a new `tick_boxes` outbox op). #16 (gates and slash commands) and #19 (reviewer) still need specs.
+
+**Order after #14:** run #15, #16, #17, #19 and #20 two at a time (one Jules session plus one Sonnet task, on non-overlapping files), then #21. Then close epic #10 and post an M1 summary on #1. The human asked for M1 to run end to end without asking.
+
+**Environment:**
+- The disk is nearly full (about 0.5–1.4 GB free). Never `gh repo clone`; use `git worktree add` from `/Applications/code/gargi-meta-harness`, and remove worktrees afterwards.
+- The network has been dropping (DNS ENOTFOUND). Retry after a pause, and resume interrupted subagents with SendMessage.
+- No worktrees, background waits or subagents were left running at handover.
+
+**Helpers** (all under `.orchestrator/tools/`):
+- `log.py row <issue> <emoji> [session] [pr]` and `log.py current <active> <session> <pr> <next>` edit #1's tables via REST.
+- `tick.sh <issue>` ticks the boxes and closes the issue.
+- `acts.py` pretty-prints `jules.py activities` output.
 
 ## Lessons from this build (in addition to docs/LESSONS.md)
 1. **Archive every Jules session** (`jules.py archive`) after merge or handoff. Open sessions use up Jules's concurrency limit (new ones sit `PAUSED`), and an abandoned FAILED session came back to life and opened a duplicate PR (#65).

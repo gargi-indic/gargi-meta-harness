@@ -1,0 +1,67 @@
+Binding details for #15 (M1.5 agent, escalate, notify executors + default playbook end-to-end). These override the issue where they differ. Build on what is merged on main and do not re-implement it:
+- `harness/engine/executors/base.py` (`Waiting`, `Done`, `ExecContext`, `ExecutorRegistry`), `harness/engine/runner.py` (`Runner`, run-context conventions in `.orchestrator/specs/m14-engine-addendum.txt`: `run.context["pr"]` is set by the runner from a Done output's `pr`; the runner owns labels, ledger, control table and the needs-you comment);
+- `harness/adapters/base.py` (`AgentAdapter`, `AgentState`, `StartRequest`, `SessionRef`, `AgentSnapshot`), `harness/adapters/fake.py` (`FakeAdapter` and its builders);
+- `harness/playbook/templating.py` (`render`, `evaluate`), `harness/playbook/load.py` (built-in playbook loading), `harness/playbooks/plan-build-review.yaml`;
+- `harness/store/repo.py` (`get_issue`, `update_step`, `append_event`), `harness/secrets.py` (`redact`), `harness/github/ledger.py` (`render_event`).
+
+## 1. Files
+- `harness/engine/brief.py`
+- `harness/engine/executors/agent.py`, `escalate.py`, `notify.py`, `branch.py`
+- `tests/engine/test_agent.py`, `tests/engine/test_brief.py`, `tests/engine/test_playbook_e2e.py` (and small helpers under `tests/engine/` if needed)
+Touch nothing else. No new dependencies. No registration wiring (#21).
+
+## 2. `brief.py`
+`build_brief(issue: IssueRow, parent_epic: IssueRow | None, repo_config: RepoConfig, context_files_text: dict[str, str], playbook_prompt: str | None) -> str` returns Markdown with, in order:
+1. `# Task: #<n> <title>` and the issue body;
+2. `## Parent epic: #<n> <title>` and its body (when given);
+3. `## Context files` with one `### <path>` section per entry (each truncated to 20,000 chars, total brief capped at 60,000 chars with a "[truncated]" marker);
+4. `## Playbook instructions` (when given);
+5. `## Rules` (always): stay strictly within the issue's scope and its out-of-scope list; do not modify these protected paths: <each `protected_paths` entry>; title the PR `#<n>: <title>`; the PR body must start with `Closes #<n>`; paste the raw output of lint and test commands in the PR body; do not add dependencies beyond what the issue requires; ask instead of guessing when the spec is unclear.
+The whole text passes through `harness.secrets.redact` before it is returned.
+
+## 3. `AgentExecutor.advance(step, node: AgentNode, ctx)`
+Common:
+- `agent = render(node.agent, ctx.template, path=f"nodes.{step.node_id}.agent")`; `adapter = ctx.adapters.get(agent)`; slot key `key = f"{ctx.run.id}/{node.session}"`.
+- The step's ref is a dict `{"session": <SessionRef.model_dump()>, ...flags}`. Resume from `step.ref` when present; never restart a session that exists.
+- Getting a session: `adapter.find(key)`; if None and the action may start one, `adapter.start(StartRequest(repo, base_branch, branch=f"harness/{issue}-{slug}", issue, title, brief, mode, idempotency_key=key))`. `slug` = title lower-cased, non-alphanumerics → `-`, collapsed, stripped, max 40 chars. `base_branch` = `repo_config.base_branch` or `(await ctx.gh.repo(repo))["default_branch"]` when `ctx.gh` is set, else `"main"`. The brief uses the cached IssueRow (`get_issue`), its parent from the store (if cached), the text of each `repo_config.context_files` entry via `ctx.gh.file_text` (skip entries ending in `/` and missing files; skip all when `ctx.gh` is None), and `node.prompt` rendered (if set).
+- **At-most-once external actions** (`approve_plan`, `send`): before the call, write the intent flag into the step's ref directly with `update_step(ctx.store, step.id, ref=<ref with flag>)`, then call the adapter, then return `Waiting(ref=<same ref>, poll_after=0)`. On a later advance, a set flag means "already done, don't repeat". (Precondition: the runner does not hold a transaction open across `advance`; if it does, stop and report it.)
+- Polling: `snap = await adapter.poll(session)`. For each `snap.activity` item, `append_event(store, repo, issue, kind="agent_activity", data={"step": step.id, "ts", "kind", "text": redact(text)[:2000]})`. Activity never goes to GitHub.
+- Timeout: `ref["since"]` = `ctx.clock()` on the first advance of the step; when `node.timeout` is set and `clock() - since > duration_seconds(node.timeout)` → `Done("timeout", {"error": "timed out after <timeout>", "correction": ...})`.
+- Terminal snapshot mapping (whichever action): `NEEDS_INPUT` → `Done("needs_input", {"question": snap.question, "session": session.id})`; `FAILED` → `Done("failed", {"error": redact(snap.error or "agent failed")})`. Otherwise `Waiting(ref, poll_after=snap.poll_after)`.
+- `pr` outputs are `snap.pr.model_dump()` (`number`, `url`, `head_sha`), so the runner sets `run.context["pr"]`.
+
+`action: plan`: find-or-start with `mode = "plan_first"` if `adapter.caps.plan_approval` else `"direct"`. `PLAN_READY` → `Done("plan_ready", {"plan": snap.plan, "session": session.id})`; `PR_READY` → `Done("pr_ready", {"pr": ...})`.
+
+`action: implement`: find; if no session, start with `mode="direct"` and skip approval. If the session exists and the step has no `approved` flag: poll once; if `PLAN_READY`, approve with the at-most-once protocol (`approve_plan(session, None)`), else just set the flag without calling. Then wait for `PR_READY` → `Done("pr_ready", {"pr": ...})`.
+
+`action: revise` (`expect` is `plan` or `pr`): find (no session → `Done("failed", {"error": "no session for slot <session>"})`). Message = `render(node.message, ...)`; an empty rendered message → `Done("failed", {"error": "empty revise message"})`.
+- First advance: poll once to record a baseline in the ref (`baseline_plan` = snap.plan, `baseline_sha` = snap.pr.head_sha if any), then send with the at-most-once protocol (`sent` flag).
+- Afterwards: `expect: plan` → Done `plan_ready` when `snap.state == PLAN_READY` and `snap.plan != baseline_plan`. `expect: pr` → Done `pr_ready` when `snap.state == PR_READY` and `snap.pr.head_sha != baseline_sha`. A stale state equal to the baseline keeps waiting.
+
+## 4. `EscalateExecutor`
+Returns `Waiting(ref=None, poll_after=3600, output={"needs_you": True, "reason": <text>, "links": [...]})`. `reason` = `f"Escalated after {prev_node or 'an earlier step'}"` plus, from `ctx.template.prev`, the first present of `question`, `error`, `correction`, `note`, `summary` (truncated to 500 chars, redacted). `links` = the PR url from `run.context["pr"]` if any. It never returns Done by itself: the human resolves it with `resume --to` (runner, addendum D). It posts nothing itself (the runner posts the needs-you comment).
+
+## 5. `NotifyExecutor`
+`msg = render(node.message, ...)`; enqueue `add_comment` with `render_event(<UTC date>, issue, "note", [msg])`, `coalesce_key=f"notify:{step.id}"`, when `ctx.outbox` is set; `Done("sent", {"message": msg})`.
+
+## 6. `BranchExecutor`
+Evaluate `node.cases` in order with `evaluate(case.when, ctx.template, path=...)`; first true → `Done(case.port, {"port": case.port})`; none → `Done(node.default, {"port": node.default})`.
+
+## 7. Tests
+- `test_brief.py`: sections present (issue, parent epic, context files, rules with every protected path, `Closes #N`, PR title); secrets set via `monkeypatch.setenv` for the keys `redact` knows (e.g. `JULES_API_KEY`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`) and placed in the issue body and a context file do not appear in the output; truncation caps.
+- `test_agent.py`: unit tests per action with FakeAdapter; `revise` never sends twice across a simulated crash (flag written, then a fresh executor/step re-advance → `send` count 1); `implement` approves once across a simulated crash; activity items land in events, not in the outbox; timeout; needs_input; failed.
+- `test_playbook_e2e.py`: load the shipped `plan-build-review.yaml` with the real loader, a Runner with the real Agent/Escalate executors, FakeAdapter, and stub review/check/gate/merge executors that return scripted outcomes per visit (and `correction` strings on `changes`/`fail`/`rejected`). Paths, each asserting the final run status, the node path taken and the adapter call log (`start`, `approve_plan`, `send` counts, and that send texts equal the scripted corrections):
+  1. happy path → `done`;
+  2. plan review `changes` once, then `approve` → `done`, 1 send;
+  3. plan review always `changes` → `revise_plan` exhausted → `escalate` → run `needs-you`;
+  4. CI `fail` then `pass` (fix round) → `done`;
+  5. PR review `changes` once (fix round) → `done`;
+  6. agent `FAILED` → `escalate` (`needs-you`);
+  7. `NEEDS_INPUT` → `escalate` (`needs-you`).
+  Bounded tick loops, fake clock, no real network or sleeps, each test < 1s.
+
+## 8. Gates
+`uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q --durations=5` all pass; paste the raw output in the PR body.
+
+## Do not add
+No changes to the runner, adapters, store, outbox, models or playbook YAML (if the shipped playbook can't run as written, stop and report why). No real review/check/gate/merge logic. No executor registry wiring in `executors/__init__.py` beyond exports.
