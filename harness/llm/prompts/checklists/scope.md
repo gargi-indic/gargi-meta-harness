@@ -1,0 +1,5 @@
+- Is every item under the issue's Scope covered?
+- Is there anything that is not in Scope (extra modules, interfaces, flags, documentation, refactors)?
+- Does it avoid everything listed under Out of scope and everything that belongs to other issues?
+- Are only files that this issue needs touched, and none of the protected paths?
+- Is any new dependency or build-config change declared in the issue?

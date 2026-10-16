@@ -1,0 +1,4 @@
+- Does the diff do what the approved plan says, step by step, with the same files, names, versions and schemas?
+- Are there files or behaviours in the diff that the plan did not mention?
+- Does any claim in the agent's notes (verified, tested, matches) contradict the diff?
+- If the diff departs from the plan, is the departure justified in the PR description, and is it acceptable?

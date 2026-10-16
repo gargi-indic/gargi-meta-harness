@@ -1,0 +1,4 @@
+- Are all versions pinned exactly (no floating `latest`, `main` or major-only tags in workflows, Dockerfiles or lock files)?
+- Does every pinned GitHub Action tag, Docker image tag and package version actually exist? Agents pin from stale memory, so ask for the evidence.
+- Did the first CI run get past "Set up job" and dependency installation?
+- Are dependency and lock-file changes limited to what the issue allows?

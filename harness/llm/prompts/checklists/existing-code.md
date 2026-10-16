@@ -1,0 +1,4 @@
+- Does it reuse the modules, helpers and types that are already on the default branch instead of writing new ones?
+- Does it keep the existing names, signatures and conventions of the code around it?
+- Does it avoid duplicating functionality that another module or issue owns?
+- Does it respect the layer above it: who owns state transitions, what the engine stamps, what the runner already does for it?

@@ -1,0 +1,4 @@
+- Does the work follow the decisions already recorded (issue body, ADRs, docs/PLAN.md, earlier review corrections)?
+- Does it reopen a design question that was settled? If yes, require the settled design.
+- Does it need a decision a human has not made (architecture change, new dependency outside the stack, a label such as `needs-discussion`)? If yes, escalate instead of choosing.
+- Is every unverified claim or assumption flagged instead of presented as fact?
