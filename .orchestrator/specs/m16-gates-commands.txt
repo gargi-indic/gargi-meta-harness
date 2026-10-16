@@ -44,6 +44,8 @@ Touch nothing else (in particular not `harness/engine/executors/__init__.py`, th
   - Applying: `approve`/`reject` → `resolve_gate` on the issue then `decide(..., decided_by=login)`; `pause`/`resume`/`cancel` → `runner.pause/resume(run_id, to=)/cancel`; `retry` → `runner.retry_node(run_id, node or <the run's latest failed/escalated node>)`, `agent=` is stored in the event data only (acting on it is M3). Errors (no pending gate, unknown node, max_visits) → a reply comment with the error text, redacted. Success → reply comment, e.g. `Approved by @x` / `Rejected by @x: <reason>` / `Paused by @x`, coalesce key `f"cmd:{comment_id}"`.
   - Every applied or rejected command appends an event `command` with `{comment_id, login, verb, ok, error}`.
 
+Runner API as merged in #14: `pause(run_id)`, `resume(run_id, to=None)` and `retry_node(run_id, node_id)` are synchronous; `cancel(run_id)` is `async` (await it; the CLI uses `asyncio.run`).
+
 ## 5. CLI (`harness/cli.py`)
 - Store from `load_global().db_path`; outbox = `Outbox(store)` (enqueue only, no draining). For controls, build `Runner(store, outbox, ExecutorRegistry(), AdapterRegistry())` (full wiring is #21; `cancel` with no adapter registered just records the cancel error event, which the runner already does best-effort).
 - `harness gates [--repo R]`: table of pending gates (id, run, issue, gate name, created).
