@@ -1,0 +1,64 @@
+Binding details for #24 (M2.2 read-only REST API). These override the issue where they differ. Read the real signatures on main first; reuse merged code, do not re-implement it. If something named here does not exist, use the closest existing API and list it in the PR body.
+Merged code to reuse: `harness/server/` from #23 (`create_app`, `deps.get_store/get_config/get_bus`, `events.EventBus/EventLogTailer`), `harness/store/repo.py` (`get_repo`, `list_issues`, `get_run`, `list_runs`, `steps_for_run`, `pending_gates`, `get_gate`, `events_since`, row models `IssueRow/RunRow/StepRow/GateRow`), `harness/config.py` (`parse_repo_config`, `RepoConfig`, `GlobalConfig.repos`), `harness/dag.py` (`blocked(issues)` = open blockers per issue; a blocker missing from the cache counts as open), `harness/playbook/models.py` (`Playbook`), `harness/playbook/load.py` (`builtin_playbooks`), `harness/engine/model.py` (`TERMINAL_STATUSES`).
+Facts on main you must respect: a run's playbook is stored as JSON in `run.context["playbook"]` (fallback: the built-in with `run.playbook_id`); the run's agent is `run.context["agent"]`; a PR is `run.context["pr"]` (`{"number": int, ...}`); steps have `node_id`, `visit`, `status` (`pending|running|waiting|done|failed`), `outcome`, `ref`, `output`, `started_at`, `ended_at`; a step needs the human when `status == "waiting"` and `output.needs_you` is true (gate and escalate executors set it; agent `needs_input` routes to the escalate node). Event-log kinds written today: `run_started`, `run_<status>` (run_running/run_needs-you/run_paused/run_done/run_failed/run_cancelled), `paused`, `resumed`, `retry`, `cancel_error`, `step_waiting`, `needs_you`, `step_done`, `executor_error`, `exhausted`, `no_route`, `unknown_node`, `routing_loop`, `playbook_missing`, `ledger_too_large`, `tick_error`, `agent_activity` (data `{step, ts, kind, text}`), `checklist_missing`, `daemon_*`, `sync_warning`, `lock_lost`.
+
+## 1. Files
+- `harness/server/schemas.py` (new): all response models (pydantic v2, `extra="forbid"`, every field with `Field(description=...)`).
+- `harness/server/derive.py` (new): pure functions turning store rows into the response models (no I/O besides the store reads passed in).
+- `harness/server/routes/__init__.py`, `routes/campaigns.py`, `routes/board.py`, `routes/inbox.py`, `routes/runs.py` (new), each an `APIRouter(prefix="/api")`; registered in `create_app()`.
+- `harness/store/queries.py` (new, read-only): `activity_for_run(store, run_id, *, after: int, limit: int) -> list[dict]` (event rows with `kind='agent_activity' AND run_id=? AND id>?` ordered by id) and `latest_runs_by_issue(store, repo) -> dict[int, RunRow]` (latest run per issue by `created_at`, then id). Add nothing to `store/repo.py` or `store/db.py`.
+- `harness/server/app.py`: register routers; set `openapi_url="/api/openapi.json"` (so it is behind the cookie auth; docs/redoc stay off).
+- `harness/server/events.py`: SSE type constants + the kind mapping (§6).
+- `tests/fixtures/__init__.py`, `tests/fixtures/server_seed.py` (new), `tests/server/test_campaigns.py`, `test_board.py`, `test_inbox.py`, `test_runs.py`, `test_activity.py`, `test_openapi.py`, `test_event_mapping.py` (new).
+Do NOT touch the engine, executors, adapters, `harness/github/*`, `harness/cli.py`, `web/`, `.github/`, `pyproject.toml`/`uv.lock` (no new deps), `.orchestrator/`, `.claude/`, `docs/PLAN.md`. No handler calls GitHub.
+
+## 2. Campaigns = registered repos (one campaign per repo in M2)
+- Campaign id = the repo full name `owner/repo`. Routes use two path params: `/api/campaigns/{owner}/{repo}/graph`. Unknown repo (not in `config.repos`) → 404 `{"detail": "unknown campaign"}`.
+- `GET /api/campaigns` → `list[CampaignSummary]` for every repo in `config.repos` (order as in config): `{id, repo, control_issue: int|null (from parse_repo_config(get_repo(...)["config_json"]) or RepoConfig()), title: repo, counts: {ready, running, needs_you, review, blocked, done, failed}}` (all ints, zero when nothing is cached).
+- Issue set for a campaign = `list_issues(store, repo)` minus the control issue.
+- `status_of(issue, open_blockers, labels)` in derive.py, first match wins: label `harness:failed` → failed; issue closed → done; label `harness:done` → done; `harness:needs-you` → needs-you; `harness:review` → review; `harness:running` → running; `harness:blocked` → blocked; open blockers non-empty → blocked; else ready.
+- `agent` = value of an `agent:<x>` label, else the repo config's `default_agent`; `playbook` = `playbook:<y>` label else `default_playbook`. `run_id` = latest run for the issue (`latest_runs_by_issue`) if its status is not terminal, else null. `url` = `https://github.com/{repo}/issues/{number}`.
+- `GET /api/campaigns/{owner}/{repo}/graph` → `{nodes: [GraphNode], edges: [{source, target}]}`; nodes sorted by number; one edge per `blocked_by` link blocker → blocked, only when both are in the node set, sorted by (source, target).
+
+## 3. Board
+`GET /api/board?campaign=owner/repo` (optional; omitted = all registered repos) → `{columns: {ready, running, needs_you, review, blocked, done, failed}}` (a `failed` column is added to the issue's list). `Card = {repo, issue, title, agent, playbook, run_id|null, pr: int|null (latest run's context.pr.number), blocked_by: [int] (all links, not only open), updated_at}`; cards in each column sorted by `updated_at` desc then issue. Unknown campaign → 404.
+
+## 4. Inbox
+`GET /api/inbox` → `list[InboxItem]` sorted by `created_at` then id. One item per step with `status == "waiting"` and truthy `output.needs_you`, in runs whose status is not terminal. Fields:
+- `id` = step id; `run_id`, `step_id`, `repo`, `issue`, `title` (cached issue title or `#<n>`), `summary` (`output.reason` or ""), `agent` (`run.context.get("agent")`), `created_at` (`step.started_at` or run.updated_at), `gate_id` (`output.gate_id` or null).
+- `kind` (a plain `str` in the schema, documented values): gate node with `gate == "plan"` → `plan_approval`; `gate == "merge"` → `merge_approval`; other gate names → `gate`; escalate node → `question` when the most recent other `done` step of the run (by `ended_at`, then id) has outcome `needs_input`, else `escalation`; any other node kind → the node kind. Node kind comes from the run's playbook (§1 facts); unknown node → `escalation`.
+- `pr`: null unless `run.context["pr"]` has an int number: `{number, url: context.pr.url or https://github.com/{repo}/pull/{n}, checks: [...]}` where checks = for each `check` node, its latest step: `{name: node_id, state: outcome or status}`, followed by each `{name: f["name"], state: f["conclusion"]}` of a failed ci step's `output.failed`.
+- `findings`: from the run's latest `review` step output `findings` (list of `{severity, file, problem, required_change}`) → `[{severity, text: "<file>: <problem>" or problem}]`; [] if none.
+Resolved items disappear automatically (step no longer waiting).
+
+## 5. Runs and activity
+- `GET /api/runs?status=&issue=&repo=` → `list[RunSummary]` = `{id, repo, issue, title, playbook_id, status, agent, pr: int|null, current_node: str|null (node of the latest non-done step, else null), created_at, updated_at}`, newest first. Filters optional; `status` must be one of `RUN_STATUSES` else 422.
+- `GET /api/runs/{id}` → `{run: RunSummary, playbook: dict (run.context["playbook"], else builtin_playbooks()[run.playbook_id].model_dump(mode="json"), else null), steps: [{id, node, visit, status, outcome, ref, started_at, finished_at}], visit_counts: {node: max visit}}`; steps ordered by (started_at, visit, id). Do NOT return `run.context` wholesale (it can hold large outputs). Unknown → 404 `{"detail": "unknown run"}`.
+- `GET /api/runs/{id}/activity?after=0&limit=200` (`limit` 1..500, else 422) → `{items: [{seq: event id, ts: data.ts or row ts, step_id: data.step, kind, text}], next: <last seq returned, or `after` when empty>}`. `kind` mapping from the adapter's kind: `message|agent|user` → message, `tool|command|bash` → tool, `state|status|plan|progress|end` → state (the Jules adapter emits progress, message, plan, end), anything else → note. Text already redacted at write time; redact again on read (cheap, defensive). Unknown run → 404.
+
+## 6. SSE event types (events.py)
+Constants `EVT_RUN_UPDATED="run.updated"`, `EVT_STEP_UPDATED="step.updated"`, `EVT_ACTIVITY="activity"`, `EVT_INBOX_CHANGED="inbox.changed"`, `EVT_ISSUE_UPDATED="issue.updated"`, `EVT_LOG="log"`, documented in the module docstring. `KIND_TO_TYPES: dict[str, tuple[str, ...]]`:
+- `run_started`, every `run_*`, `paused`, `resumed`, `retry`, `cancel_error` → (run.updated, issue.updated) (`run_needs-you`, `run_done`, `run_failed`, `run_cancelled` also add inbox.changed)
+- `step_waiting`, `step_done` → (step.updated, inbox.changed); `executor_error`, `exhausted`, `no_route`, `unknown_node`, `routing_loop` → (step.updated,)
+- `needs_you` → (inbox.changed, step.updated)
+- `agent_activity` → (activity,)
+- anything else → (log,)
+`EventLogTailer.poll_once` publishes one bus event per mapped type per row (same payload as today: `{id, ts, repo, issue, run_id, kind, data}`), in row order. Keep #23's redaction and exactly-once semantics; update its tests for the new types.
+
+## 7. `tests/fixtures/server_seed.py`
+`def seed_store(store: Store) -> Seed` (a frozen dataclass of the ids it created) using only the store repo functions (`upsert_repo`, `upsert_issue`, `insert_run`, `insert_step`, `update_step`, `insert_gate`, `append_event`), deterministic timestamps, no engine. Content: repo `acme/widgets` with config `control_issue: 1`; `GlobalConfig(repos=[acme/widgets])` helper `seed_config()`; control issue #1 plus 6 issues #2–#7: #2 closed (`harness:done`), #3 open blocked_by [2] → ready, #4 open blocked_by [3] → blocked, #5 `harness:running` with run A (plan-build-review, steps plan v1 done plan_ready, plan_review v1 done changes, revise_plan v1 done plan_ready, plan_review v2 done approve, plan_gate v1 waiting with gate row + output `{needs_you, reason, gate_id}`, context.pr absent), #6 `harness:needs-you` with run B (implement done pr_ready, ci done fail with `failed`, fix done needs_input, escalate v1 waiting needs_you; context.pr = {number: 42}; a pr_review step done `changes` with 2 findings), #7 open with label `agent:fake` and no run. 5 `agent_activity` events for run A. Return the ids. M2.6–M2.10 reuse it.
+
+## 8. Tests (pytest, no network)
+Use `create_app(store=..., config=seed_config(), token="t", tail_events=False)` with the httpx ASGI client + cookie from #23's tests (reuse their helper; move it to `tests/server/conftest.py` if needed).
+1. campaigns: counts per status match the seed; control issue excluded; unregistered repo → 404; no cookie → 401.
+2. graph: nodes #2–#7 with statuses done/ready/blocked/running/needs-you/ready; edges exactly (2→3), (3→4); closing #3 in the store moves #4 to ready.
+3. board: columns contain the right issues; `?campaign=nope/nope` → 404; card pr=42 for #6.
+4. inbox: exactly 2 items: plan_approval for run A (gate_id set) and `question` for run B (prev done step outcome needs_input) with pr.number 42, checks incl. the failed ci item, 2 findings; after `update_step(..., status="done")` on the gate step the item disappears; terminal run's waiting step not listed.
+5. runs: list newest first, filters by status/issue/repo, bad status → 422; detail has the playbook from context (and the builtin fallback when context has none), visit_counts `plan_review: 2`, steps ordered; unknown → 404.
+6. activity: `limit=2` pages through the 5 seeded items with `after`/`next`: no gaps, no duplicates, final page empty with `next == after`; kind mapping; limit 0 / 501 → 422; unknown run → 404.
+7. openapi: GET `/api/openapi.json` with cookie → 200; without → 401; snapshot test of the sorted path list (a literal list in the test) so contract changes are visible.
+8. event mapping: rows of each kind class publish the documented SSE types, in order, exactly once.
+All of `uv run ruff format --check .`, `uv run ruff check .`, `uv run pytest -q` pass. Paste the raw pytest tail in the PR body.
+
+## 9. Do not add
+Write endpoints, GitHub calls, caching layers, pagination beyond activity, new dependencies, changes to the engine or store schema, planner/agents endpoints.

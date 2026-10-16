@@ -1,0 +1,70 @@
+Binding details for #27 (M2.5 shared React Flow canvas, ELK layout, playbook-to-graph). These override the issue where they differ. Read the real code on main first (`web/` from #26: `src/ui/*`, `src/styles/{tokens,lab}.css`, `src/generated/playbook.d.ts`, `src/app/routes.tsx`, the design-rules test; `harness/playbook/models.py` for the authoritative ports). Reuse it; do not re-implement it. If something named here does not exist, use the closest existing thing and list it in the PR body.
+
+## 1. Files
+- `web/src/canvas/{FlowCanvas.tsx, layout.ts, convert.ts, ports.ts, types.ts, edges.tsx, canvas.css, index.ts}`, `web/src/canvas/nodes/NodeCard.tsx`, `web/src/canvas/__fixtures__/plan-build-review.json`, tests next to each (`*.test.ts(x)`).
+- `web/src/app/routes.tsx` (modify): add the dev-only `/dev/canvas` route (§7). Nothing else in app/.
+- `web/package.json` + lock: add exact pins `@xyflow/react@12` (latest 12.x), `elkjs` (latest 0.x/0.10+), `yaml` (latest 2.x) — exact versions, no `^`. No other packages.
+- `scripts/export_playbook_schema.py` (modify, minimal): additionally write `web/src/generated/ports.cases.json` (§3); `--check` covers both files.
+- `web/src/generated/ports.cases.json` (generated, committed).
+- The `/dev/canvas` page component `web/src/canvas/DevCanvasPage.tsx`.
+Do NOT touch `harness/**`, `tests/**`, `.github/` (the existing drift step already runs the export script with `--check`), `src/ui/*`, `src/api/*`, `tokens.css`, `docs/`, `.orchestrator/`, `.claude/`.
+
+## 2. Types and component (`types.ts`, `FlowCanvas.tsx`)
+```ts
+export type NodeStatus = "pending" | "running" | "waiting" | "needs-you" | "done" | "failed" | "skipped";
+export interface CanvasNode { id: string; kind: string; label: string; status?: NodeStatus; badge?: string; ports?: string[]; data?: unknown }
+export interface CanvasEdge { id: string; source: string; target: string; sourcePort?: string; label?: string; dashed?: boolean }
+export interface FlowCanvasProps {
+  nodes: CanvasNode[]; edges: CanvasEdge[]; mode: "view" | "edit"; direction?: "RIGHT" | "DOWN";
+  selectedId?: string | null; onSelect?: (id: string | null) => void;
+  onConnect?: (c: { source: string; target: string; sourcePort: string | null }) => void;
+  onNodesDelete?: (ids: string[]) => void; onEdgesDelete?: (ids: string[]) => void;
+  onNodeMove?: (id: string, pos: { x: number; y: number }) => void;
+  positions?: Record<string, { x: number; y: number }>;   // when given, skip auto layout for those ids
+  renderNode?: (n: CanvasNode) => React.ReactNode;
+  height?: number | string;
+}
+```
+- Controlled: no node/edge state copied into the component beyond what React Flow needs for rendering; callbacks report intent only.
+- `view`: `nodesDraggable={false} nodesConnectable={false} elementsSelectable` (click still calls onSelect), no delete key handling. `edit`: draggable, connectable, `deleteKeyCode` Backspace/Delete → onNodesDelete/onEdgesDelete; drag stop → onNodeMove.
+- Layout: positions from `layoutGraph` (async, show the graph after the first layout resolves; keep previous positions while recomputing), overridden by `positions`.
+- `fitView` on first layout; `proOptions={{ hideAttribution: true }}` is NOT allowed (keep the attribution, license). Background: none or a `--line-soft` dot grid via CSS variable only. MiniMap/Controls: Controls only, styled with tokens.
+- Import `@xyflow/react/dist/style.css` then `canvas.css` overriding every colour, radius and shadow React Flow ships with token variables / `0` / `none` (the design-rules test must still pass for `canvas.css`; React Flow's own CSS in node_modules is outside `web/src`).
+
+## 3. Ports (`ports.ts`) — mirror Python, checked against Python
+- `portsFor(node: PlaybookNode): string[]` mirroring `harness/playbook/models.py` `ports()` exactly: agent by `action` (`plan` → plan_ready, pr_ready, needs_input, failed, timeout; `implement` → pr_ready, needs_input, failed, timeout; `revise` → `${expect}_ready`, needs_input, failed, timeout); review → approve, changes, escalate; check → pass, fail; gate → approved, rejected; branch → each `cases[].port` then `default`; parallel → []; join → done, failed; decompose → created, failed; merge → merged, failed; escalate → resolved; notify → sent; plus `exhausted` last when `max_visits` is set.
+- `export_playbook_schema.py` writes `ports.cases.json`: a list of `{node: <node JSON>, ports: [...]}` built in Python from one sample node per kind and per agent action/expect variant, each with and without `max_visits` (instantiate the pydantic models, call `.ports()`; `json.dumps(indent=2)+"\n"`). A Vitest test asserts `portsFor(c.node)` equals `c.ports` for every case, and that every `kind` const in the generated schema appears in the cases. This replaces the issue's hand-kept `PORTS_BY_KIND` table.
+
+## 4. `convert.ts`
+- `playbookToGraph(pb: Playbook): { nodes: CanvasNode[]; edges: CanvasEdge[] }`:
+  - One CanvasNode per playbook node (`id`, `kind`, `label` = `title ?? id`, `ports` = portsFor, `data` = the node), in `pb.nodes` key order; plus a terminal node per referenced terminal target (`@done`, `@failed`) with `kind: "terminal"`, `label: "done"`/`"failed"`, `ports: []`, appended last.
+  - Explicit edges `node.port: target` → `{id: "node.port", source: node, target, sourcePort: port, label: port}`.
+  - Wildcards `*.port: target`: for every node that has `port` in its ports, has no explicit `node.port` edge, and is not the target itself → a route. Collapse all wildcard routes with the same (source, target) into ONE edge `{id: "wild:<source>-><target>", dashed: true, sourcePort: null, label: ports sorted and joined as "*.a, *.b"}`.
+  - Expected for the default playbook (`__fixtures__/plan-build-review.json`, the JSON of `harness/playbooks/plan-build-review.yaml` produced by Python `Playbook.model_dump(mode="json")`, not hand-typed — generate it with a one-off command and say which in the PR): 12 playbook nodes + 1 terminal (`@done`) = 13 nodes; 19 explicit edges + 11 collapsed wildcard edges = 30 edges; every edge endpoint exists.
+  - Unknown edge sources/targets (invalid playbooks in the editor later) are dropped and reported: return also `problems: string[]`.
+- `issueGraphToCanvas(g: {nodes: {id: number; title: string; status: string; agent?: string|null; playbook?: string|null; run_id?: string|null; url?: string}[]; edges: {source: number; target: number}[]}): {nodes; edges}` — ids become strings (`"#12"` label prefix in mono), kind `"issue"`, status mapped: ready→pending, running→running, needs-you→needs-you, review→waiting, blocked→skipped, done→done, failed→failed; edge id `"<s>-><t>"`. (Shape mirrors #24's `/graph`; define the input type locally, do not import server code.)
+
+## 5. `layout.ts`
+`layoutGraph(nodes, edges, opts?: {direction?: "RIGHT"|"DOWN"}): Promise<Record<string, {x:number; y:number}>>` using `elkjs/lib/elk.bundled.js` (no web worker), `elk.algorithm: layered`, `elk.direction`, `elk.layered.spacing.nodeNodeBetweenLayers: 64`, `elk.spacing.nodeNode: 32`, `elk.edgeRouting: ORTHOGONAL`, deterministic: sort nodes and edges by id before handing them to ELK. Fixed sizes: `NODE_SIZE = {default: {w: 200, h: 72}, terminal: {w: 96, h: 40}, issue: {w: 240, h: 72}}`. Memoise by a key of sorted node ids+kinds and sorted edge ids+endpoints+direction (bounded LRU of 32).
+
+## 6. Rendering (`NodeCard.tsx`, `edges.tsx`, `canvas.css`)
+- NodeCard: square, `2px solid var(--ink)` border, `--paper` background; id in mono 12px; kind as a mono 11px uppercase label; optional `badge` (e.g. `x3`) in mono; optional `StatusTag` (reuse `src/ui/StatusTag`) for status; outcome handles: one source `Handle` per port with `id = port`, labelled in mono 11px; one target handle. Status → class `node--<status>`: running = `--accent` border; done = `--ink` border; failed = `--accent` background + `--on-accent` text; waiting/needs-you = `2px dashed var(--accent)`; pending/skipped = `--faint` border and text. Selected = `outline: 2px solid var(--accent); outline-offset: 2px`. Terminal nodes: same rules, smaller.
+- Edges: custom edge type, `stroke: var(--ink)`, `stroke-width: 2`, arrow marker coloured via `var(--ink)` (use a CSS-variable-driven marker or `MarkerType.ArrowClosed` with `color` read from a CSS custom property at render time — no hex), optional mono label on a `--paper` background, `stroke-dasharray: 6 4` when dashed.
+- Classes and CSS variables only; no inline colour values; no `boxShadow`; border-radius 0 (override React Flow's `.react-flow__node` radius, handles may be square too).
+- Respect `prefers-reduced-motion` (no animated edges; `animated` is never set).
+
+## 7. Dev route
+`/dev/canvas` renders `DevCanvasPage` (fixture → playbookToGraph → FlowCanvas, a view/edit toggle using `Button`, logs callbacks to an on-page list). Registered only when `import.meta.env.DEV` is true (so `vite build` excludes it from routes and the bundle can tree-shake it via a dynamic `import()` behind the DEV check); not in the header nav.
+
+## 8. Tests (Vitest + Testing Library, jsdom; stub `ResizeObserver` and `DOMMatrixReadOnly` as React Flow's testing docs describe; no network)
+1. ports: every case in `ports.cases.json` matches `portsFor`; every schema kind covered.
+2. convert: default playbook → 13 nodes, 30 edges, 19 solid + 11 dashed, no dangling endpoints; `plan` has ports plan_ready, pr_ready, needs_input, failed, timeout; `plan_review` has `exhausted`; a playbook with an explicit `x.failed` edge produces no wildcard route for `x.failed`; invalid target reported in `problems`; `issueGraphToCanvas` maps ids/status/edges.
+3. layout: same input twice → identical positions; no two node rectangles overlap (using NODE_SIZE); DOWN vs RIGHT differ; memo returns the same object for the same key.
+4. FlowCanvas view mode renders all 13 node labels and the port labels of `plan`; clicking a node calls onSelect; in view mode `onConnect`/`onNodeMove` are never called (simulate via the React Flow callbacks you pass through — test the handler wiring by rendering with mode="view" and asserting the props given to `<ReactFlow>` via a light `vi.mock('@xyflow/react', ...)` wrapper if direct DOM drag is not feasible); edit mode: `onConnect` called with `{source, target, sourcePort}`.
+5. NodeCard status classes for all statuses; StatusTag reused.
+6. The existing design-rules test passes with the new CSS (no hex, radius 0, no shadows/gradients) — extend it to also fail on `boxShadow` / `style={{ ... color: '#` in `.tsx` under `src/canvas`.
+7. Router: `/dev/canvas` exists when DEV is true and is absent from the header nav.
+`npm run lint`, `npm run typecheck`, `npm test`, `npm run build` and `uv run python scripts/export_playbook_schema.py --check` must pass; paste the raw tails in the PR body.
+
+## 9. Do not add
+Screens (Campaigns/Run view/editor), data fetching, `graphToPlaybook`, inspector forms (rjsf), MiniMap, a state library (zustand/redux), any server change, any package beyond the three named.
