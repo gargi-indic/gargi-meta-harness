@@ -1,6 +1,7 @@
 """CLI: gates, approve, reject, pause, resume, cancel, retry (M1.6). Uses a temp config and database."""
 
 import asyncio
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -135,7 +136,8 @@ def test_issue_ref_needs_repo_when_ambiguous(tmp_path: Path, monkeypatch: pytest
 def test_reject_requires_note(world: World) -> None:
     result = cli.invoke(app, ["reject", world.gate_id])
     assert result.exit_code != 0
-    assert "--note" in result.output
+    # Rich may colour the usage error (CI sets FORCE_COLOR), splitting "--note" with ANSI codes.
+    assert "--note" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     store = world.store()
     gate = get_gate(store, world.gate_id)
     store.close()
