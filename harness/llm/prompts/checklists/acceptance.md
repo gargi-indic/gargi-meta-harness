@@ -1,0 +1,4 @@
+- Is every Acceptance criterion satisfied by something you can see in the plan or diff (code and a test), not only claimed?
+- Does each criterion that names a test have that test, and does the test assert the behaviour, not just that code runs?
+- Are failure paths and edge cases from the criteria tested (invalid input, retries, empty results)?
+- Is the raw output of the required gates (lint, format, tests) present where the issue asks for it, and does it say what it should?
