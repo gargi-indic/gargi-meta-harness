@@ -113,7 +113,22 @@ MIGRATIONS: list[list[str]] = [
             fetched_at TEXT
         )
         """,
-    ]
+    ],
+    [
+        """
+        CREATE TABLE control_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            step_id TEXT,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            handled_at TEXT,
+            result_json TEXT
+        )
+        """,
+        "CREATE INDEX idx_control_requests_pending ON control_requests (handled_at, id)",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from harness.store.db import Store
+from harness.store.db import SCHEMA_VERSION, Store
 from harness.store.repo import (
     GateRow,
     IssueRow,
@@ -43,7 +43,7 @@ def store(request, tmp_path):
 def test_migrate_idempotent(store):
     store.migrate()
     rows = store.query("SELECT value FROM meta WHERE key = 'schema_version'")
-    assert int(rows[0]["value"]) == 1
+    assert int(rows[0]["value"]) == SCHEMA_VERSION
 
 
 def test_failing_migration_rolls_back(tmp_path):
