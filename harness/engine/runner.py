@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from harness.adapters.base import AdapterRegistry, SessionRef
 from harness.config import RepoConfig
+from harness.engine.control import apply_pending
 from harness.engine.executors.base import Done, ExecContext, ExecutorRegistry, Waiting
 from harness.engine.model import TERMINAL_STATUSES, to_snapshot
 from harness.github.client import GitHub
@@ -579,6 +580,7 @@ class Runner:
 
     async def tick(self) -> int:
         """Advance every runnable step once; returns how many steps were advanced."""
+        await apply_pending(self, self.store)
         advanced = 0
         for due in self._due_steps(self._iso()):
             if await self._advance_one(due.run_id, due.id):
