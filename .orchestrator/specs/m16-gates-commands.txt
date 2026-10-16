@@ -1,0 +1,65 @@
+Binding details for #16 (M1.6 gate executor, CLI approve/reject/resume, /harness slash commands). These override the issue where they differ. Build on what is merged on main and do not re-implement it:
+- `harness/engine/executors/base.py` (`Waiting`, `Done`, `ExecContext`), `harness/engine/runner.py` (`Runner.pause/resume/cancel/retry_node`; the runner owns labels, ledger, control table and the needs-you comment: see `.orchestrator/specs/m14-engine-addendum.txt` §C/§D);
+- `harness/store/repo.py` (`GateRow`, `insert_gate`, `decide_gate`, `pending_gates`, `get_run`, `list_runs`, `steps_for_run`, `append_event`), `harness/store/db.py` (`Store`, the `meta` key/value table);
+- `harness/playbook/models.py` (`GateNode`, `Playbook.gates`, `GateMode = "human" | "auto" | AutoIf`), `harness/playbook/templating.py` (`evaluate`);
+- `harness/github/client.py` (`GitHub.paginate`, `GitHub.repo`), `harness/github/outbox.py` (`Outbox.enqueue("add_comment", ...)`), `harness/github/ledger.py` (`render_event`);
+- `harness/config.py` (`RepoConfig.command_users`, `load_global`, `GlobalConfig.db_path`), `harness/cli.py` (existing typer app).
+
+## 1. Files
+- `harness/engine/executors/gate.py` (new)
+- `harness/github/commands.py` (new)
+- `harness/store/repo.py`: add exactly `get_gate(store, gate_id) -> GateRow | None`, `get_meta(store, key) -> str | None` and `set_meta(store, key, value) -> None` (upsert into the existing `meta` table). No other changes there.
+- `harness/cli.py`: add the commands in §5. Do not change existing commands.
+- `tests/engine/test_gate.py`, `tests/github/test_commands.py`, `tests/test_cli_gates.py` (new)
+Touch nothing else (in particular not `harness/engine/executors/__init__.py`, the runner, the outbox or models). No new dependencies.
+
+## 2. `GateExecutor.advance(step, node: GateNode, ctx)`
+- `mode = ctx.playbook.gates[node.gate]` (the validator guarantees it exists; a missing name → `Done("failed", {"error": "unknown gate <name>"})`).
+- `"auto"` → `Done("approved", {"note": None, "decided_by": "auto"})`.
+- `AutoIf` → `evaluate(mode.auto_if, ctx.template, path=f"gates.{node.gate}.auto_if")`; true → `Done("approved", {"note": None, "decided_by": "auto_if"})`; false → behave as `"human"`.
+- `"human"`:
+  - gate id = `f"{step.id}/gate"`. If `get_gate` returns None, `insert_gate(GateRow(id, run_id, step_id=step.id, name=node.gate, status="pending", note=None, decided_by=None, created_at=store.now(), decided_at=None))`. Idempotent: never insert twice (crash-safe re-advance).
+  - pending → `Waiting(ref={"gate_id": id}, poll_after=15.0, output={"needs_you": True, "reason": f"Gate '{node.gate}' needs a decision", "links": [<PR url from run.context["pr"] if any>], "gate_id": id})`. The executor posts NOTHING and enqueues NOTHING itself; the runner turns `needs_you` into the label and the one needs-you comment. The `reason` should also say how to answer: `/harness approve [note]` or `/harness reject <reason>`, or `harness approve <gate-id>`.
+  - `approved` / `rejected` → `Done(<status>, {"note": gate.note, "decided_by": gate.decided_by})`. A rejection note is then `{{ <gate_node>.note }}` in templates (and `correction` is ALSO set to the note on rejection, per the correction convention, so `revise` nodes can use `prev.correction`).
+
+## 3. Decision API (shared by CLI and slash commands) in `commands.py`
+- `decide(store, gate_id, status, note, decided_by) -> GateRow`: `decide_gate(...)` plus `append_event(kind="gate_decided", data={gate_id, status, note, decided_by})`. Raises `KeyError` (unknown) / `ValueError` (not pending) unchanged.
+- `resolve_gate(store, repo, ref: str) -> GateRow`: `ref` is a gate id, or an issue number (`"42"` or `"#42"`) meaning "the single pending gate of the active run on that issue"; zero or several matches → `ValueError` with a clear message.
+- The runner picks the decision up on its next tick (the gate step re-polls); no direct runner call is needed for approve/reject.
+
+## 4. Slash commands (`commands.py`)
+- `@dataclass Command`: `verb` (`approve|reject|retry|pause|resume|cancel`), `note: str | None`, `node: str | None`, `agent: str | None`, `to: str | None`.
+- `parse_command(body) -> Command | None`: the FIRST non-empty line must start with `/harness ` (case-sensitive, leading whitespace allowed); anything else → None. Grammar:
+  - `/harness approve [note...]`
+  - `/harness reject <reason...>` (reason required; missing → None)
+  - `/harness retry [node] [agent=<name>]`
+  - `/harness pause`, `/harness cancel`
+  - `/harness resume [--to <node>]`
+  Unknown verb → None. The note/reason is the rest of the line (stripped), max 2,000 chars.
+- `async poll_commands(gh, store, repo, runner, *, repo_config, outbox) -> int` (returns commands applied):
+  - Issues considered: those with a run in status `running`, `needs-you` or `paused` for `repo`.
+  - Per issue, last-seen comment id lives in `meta` under `f"commands:{repo}#{issue}"`. If absent, the baseline is the run's `created_at`: comments created before it are never processed. Fetch `repos/{repo}/issues/{n}/comments` with `since=<baseline ISO>` via `gh.paginate`, process comments with id > last seen in id order, and `set_meta` after EACH processed comment (so a crash mid-batch never re-applies one).
+  - Skip comments whose body does not parse, and comments authored by the harness's own replies (bodies starting with `**` event format are not commands anyway).
+  - Allowed users: `repo_config.command_users`; when empty, the repo owner (`repo.split("/")[0]`). Compare logins case-insensitively. A command from anyone else: enqueue ONE reply via `outbox.enqueue("add_comment", {repo, issue, body: render_event(date, issue, "command ignored", [f"@{login} is not allowed to run harness commands"])}, coalesce_key=f"cmd:{comment_id}")` and do nothing else.
+  - Applying: `approve`/`reject` → `resolve_gate` on the issue then `decide(..., decided_by=login)`; `pause`/`resume`/`cancel` → `runner.pause/resume(run_id, to=)/cancel`; `retry` → `runner.retry_node(run_id, node or <the run's latest failed/escalated node>)`, `agent=` is stored in the event data only (acting on it is M3). Errors (no pending gate, unknown node, max_visits) → a reply comment with the error text, redacted. Success → reply comment, e.g. `Approved by @x` / `Rejected by @x: <reason>` / `Paused by @x`, coalesce key `f"cmd:{comment_id}"`.
+  - Every applied or rejected command appends an event `command` with `{comment_id, login, verb, ok, error}`.
+
+## 5. CLI (`harness/cli.py`)
+- Store from `load_global().db_path`; outbox = `Outbox(store)` (enqueue only, no draining). For controls, build `Runner(store, outbox, ExecutorRegistry(), AdapterRegistry())` (full wiring is #21; `cancel` with no adapter registered just records the cancel error event, which the runner already does best-effort).
+- `harness gates [--repo R]`: table of pending gates (id, run, issue, gate name, created).
+- `harness approve <gate-id|issue> [--note TEXT] [--repo R]`, `harness reject <gate-id|issue> --note TEXT [--repo R]` (`--repo` needed only for issue refs; `decided_by` = `"cli"`).
+- `harness pause <run>`, `harness resume <run> [--to NODE]`, `harness cancel <run>`, `harness retry <run> [NODE]`.
+- Errors print a one-line message and exit 1. Tests use typer's `CliRunner` with a temp config/db (monkeypatch HOME or the config path the existing CLI tests use).
+
+## 6. Tests
+- Gate: `auto`; `auto_if` true; `auto_if` false → human; `human` creates exactly one gate row across two advances and returns needs_you Waiting with the gate id; approved → Done `approved` with note/decided_by; rejected → Done `rejected` with `note` and `correction`; executor enqueues nothing to the outbox.
+- An end-to-end through a real `Runner` with a 2-node playbook (`gate` → `@done`, `rejected` → `@failed`): run goes `needs-you`, then `decide(...)` + tick → `done`.
+- Commands: parser table test for every verb and the rejections (no prefix, unknown verb, reject without reason, prefix not on first line). `poll_commands` with respx (`pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True)`, `GitHub(..., write_spacing=0.0)` with injected sleep/clock): allowed approve decides the gate and enqueues the ack; a non-allowed user gets a reply and the gate stays pending; restart (fresh call on the same store) processes nothing twice; comments before the run's creation are ignored; pause/resume/cancel/retry call the runner; an error produces a reply.
+- CLI: `gates`, `approve` by gate id and by issue, `reject` requires `--note`, `pause`/`resume`.
+- No network, no real sleeps, every test < 1s.
+
+## 7. Gates
+`uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q --durations=5` all pass; paste the raw output in the PR body.
+
+## Do not add
+No UI/inbox, no rerouting to another agent, no executor registration wiring, no daemon loop calling `poll_commands` (#21 does that), no changes to the runner or outbox.
