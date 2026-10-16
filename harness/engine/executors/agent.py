@@ -1,13 +1,16 @@
+"""Executor for the agent node."""
+
 import re
 from typing import Any
 
 from harness.adapters.base import AgentState, SessionRef, StartRequest
 from harness.engine.brief import build_brief
 from harness.engine.executors.base import Done, ExecContext, Executor, Waiting
+from harness.github.client import GitHubError
 from harness.playbook.models import AgentNode, Node
 from harness.playbook.templating import render
 from harness.secrets import redact
-from harness.store.repo import append_event, get_issue, update_step
+from harness.store.repo import IssueRow, append_event, get_issue, update_step
 
 
 def duration_seconds(timeout: str) -> float:
@@ -26,17 +29,6 @@ class AgentExecutor(Executor):
         agent_name = render(node.agent, ctx.template, path=f"nodes.{step.node_id}.agent")
         adapter = ctx.adapters.get(agent_name)
         key = f"{ctx.run.id}/{node.session}"
-
-        # Determine base_branch
-        base_branch = "main"
-        if ctx.repo_config.base_branch:
-            base_branch = ctx.repo_config.base_branch
-        elif ctx.gh:
-            try:
-                repo_data = await ctx.gh.repo(ctx.run.repo)
-                base_branch = repo_data.get("default_branch", "main")
-            except Exception:
-                pass
 
         ref = dict(step.ref) if step.ref else {}
 
@@ -65,7 +57,31 @@ class AgentExecutor(Executor):
 
         # Helper to construct StartRequest
         async def start_session(mode: str) -> SessionRef:
+            base_branch = "main"
+            if ctx.repo_config.base_branch:
+                base_branch = ctx.repo_config.base_branch
+            elif ctx.gh:
+                try:
+                    repo_data = await ctx.gh.repo(ctx.run.repo)
+                    base_branch = repo_data.get("default_branch", "main")
+                except GitHubError:
+                    pass
+
             issue = get_issue(ctx.store, ctx.run.repo, ctx.run.issue)
+            if not issue:
+                issue = IssueRow(
+                    repo=ctx.run.repo,
+                    number=ctx.template.issue.number,
+                    id=ctx.template.issue.number,
+                    title=ctx.template.issue.title,
+                    body=ctx.template.issue.body,
+                    state="open",
+                    labels=ctx.template.issue.labels,
+                    parent=None,
+                    blocked_by=[],
+                    updated_at="1970-01-01T00:00:00Z",
+                )
+
             parent = get_issue(ctx.store, ctx.run.repo, issue.parent) if issue.parent else None
 
             context_files_text = {}
@@ -76,7 +92,7 @@ class AgentExecutor(Executor):
                     try:
                         text = await ctx.gh.file_text(ctx.run.repo, fpath, ref=base_branch)
                         context_files_text[fpath] = text
-                    except Exception:
+                    except GitHubError:
                         pass
 
             prompt = (
@@ -102,6 +118,7 @@ class AgentExecutor(Executor):
             return await adapter.start(req)
 
         # Handling different actions
+        snap = None
         if node.action == "plan":
             if not session:
                 mode = "plan_first" if adapter.caps.plan_approval else "direct"
@@ -122,14 +139,19 @@ class AgentExecutor(Executor):
                 if snap.state == AgentState.PLAN_READY:
                     ref["approved"] = True
                     update_step(ctx.store, step.id, ref=ref)
-                    ctx.crash("implement_before_approve")
                     await adapter.approve_plan(session, None)
                     return Waiting(ref=ref, poll_after=0)
-                else:
+                elif snap.state in (
+                    AgentState.WORKING,
+                    AgentState.PR_READY,
+                    AgentState.NEEDS_INPUT,
+                    AgentState.FAILED,
+                ):
                     ref["approved"] = True
                     update_step(ctx.store, step.id, ref=ref)
 
-            snap = await adapter.poll(session)
+            if not snap:
+                snap = await adapter.poll(session)
 
         elif node.action == "revise":
             if not session:
@@ -146,27 +168,32 @@ class AgentExecutor(Executor):
                 ref["sent"] = True
                 update_step(ctx.store, step.id, ref=ref)
 
-                ctx.crash("revise_before_send")
                 await adapter.send(session, msg)
+                # Ensure activity is captured by falling through
+                # Actually wait, we should fall through, so we just set snap and process activity.
+                # Oh wait, the `Waiting` was returned immediately.
+                # Let's poll again or just process the first snap?
+                # The spec says "wait for PR_READY/PLAN_READY".
+                # If we fall through, we might immediately return Done if the state is still PR_READY but sha hasn't changed...
+                # Oh right, `Waiting` must be returned.
+                # Process activity first!
+                if snap.activity:
+                    for item in snap.activity:
+                        append_event(
+                            ctx.store,
+                            ctx.run.repo,
+                            ctx.run.issue,
+                            kind="agent_activity",
+                            data={
+                                "step": step.id,
+                                "ts": item.ts,
+                                "kind": item.kind,
+                                "text": redact(item.text)[:2000],
+                            },
+                        )
                 return Waiting(ref=ref, poll_after=0)
 
             snap = await adapter.poll(session)
-            if node.expect == "plan":
-                if snap.state == AgentState.PLAN_READY and snap.plan != ref.get("baseline_plan"):
-                    return Done("plan_ready", {"plan": snap.plan, "session": session.id})
-            elif node.expect == "pr":
-                if (
-                    snap.state == AgentState.PR_READY
-                    and snap.pr
-                    and snap.pr.head_sha != ref.get("baseline_sha")
-                ):
-                    return Done("pr_ready", {"pr": snap.pr.model_dump()})
-
-            if snap.state in (AgentState.NEEDS_INPUT, AgentState.FAILED):
-                # Will be handled below by generic handlers
-                pass
-            else:
-                return Waiting(ref=ref, poll_after=snap.poll_after)
 
         else:
             raise ValueError(f"unknown agent action: {node.action}")
@@ -186,6 +213,19 @@ class AgentExecutor(Executor):
                         "text": redact(item.text)[:2000],
                     },
                 )
+
+        # Return logic for revise
+        if node.action == "revise":
+            if node.expect == "plan":
+                if snap.state == AgentState.PLAN_READY and snap.plan != ref.get("baseline_plan"):
+                    return Done("plan_ready", {"plan": snap.plan, "session": session.id})
+            elif node.expect == "pr":
+                if (
+                    snap.state == AgentState.PR_READY
+                    and snap.pr
+                    and snap.pr.head_sha != ref.get("baseline_sha")
+                ):
+                    return Done("pr_ready", {"pr": snap.pr.model_dump()})
 
         # Map terminal states
         if snap.state == AgentState.NEEDS_INPUT:

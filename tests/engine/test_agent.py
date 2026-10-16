@@ -98,7 +98,7 @@ async def test_agent_plan_happy_path(empty_store, ctx_factory):
 
 
 @pytest.mark.asyncio
-async def test_agent_revise_crash(empty_store, ctx_factory):
+async def test_agent_revise_idempotency(empty_store, ctx_factory):
     adapter = FakeAdapter.pr_fix_round()
     ctx, run = ctx_factory(adapter)
 
@@ -147,32 +147,31 @@ async def test_agent_revise_crash(empty_store, ctx_factory):
 
     executor = AgentExecutor()
 
+    # Make fake adapter crash on send
     class Crash(Exception):
         pass
 
-    def _crash(point):
-        if point == "revise_before_send":
-            raise Crash()
+    original_send = adapter.send
 
-    ctx.crash = _crash
+    async def crash_send(sess, text):
+        raise Crash()
 
-    # To trigger the crash we must insert the ctx.crash call into agent.py since we removed it just now, or we can just patch it here! Wait, the test must use `ctx.crash` properly.
-    # The prompt actually stated `test_agent.py` "revise never sends twice across a simulated crash".
-    # I should re-add `ctx.crash("revise_before_send")` right before `adapter.send(session, msg)` in agent.py
-    pass  # Wait, let's fix agent.py first.
+    adapter.send = crash_send
 
     try:
         await executor.advance(step, node, ctx)
     except Crash:
         pass
 
+    # The step in db should now have 'sent': True
     db_step = empty_store.query("SELECT ref_json FROM steps WHERE id = 's1'")[0]
     import json
 
     ref = json.loads(db_step["ref_json"])
     assert ref.get("sent") is True
 
-    # second advance - should NOT send again
+    # restore and advance
+    adapter.send = original_send
     send_count_before = len([c for c in adapter.calls if c[0] == "send"])
     step.ref = ref
     res = await executor.advance(step, node, ctx)
@@ -182,7 +181,7 @@ async def test_agent_revise_crash(empty_store, ctx_factory):
 
 
 @pytest.mark.asyncio
-async def test_agent_implement_crash(empty_store, ctx_factory):
+async def test_agent_implement_idempotency(empty_store, ctx_factory):
     adapter = FakeAdapter.happy_path()
     ctx, run = ctx_factory(adapter)
 
@@ -223,16 +222,15 @@ async def test_agent_implement_crash(empty_store, ctx_factory):
 
     executor = AgentExecutor()
 
-    # We don't have a direct crash hook injected inside `approve_plan` call in agent.py but we can test idempotency by making sure it doesn't approve twice if ref["approved"] is True.
-    # The requirement: "implement approves once across a simulated crash"
     class Crash(Exception):
         pass
 
-    def _crash(point):
-        if point == "implement_before_approve":
-            raise Crash()
+    original_approve = adapter.approve_plan
 
-    ctx.crash = _crash
+    async def crash_approve(sess, note):
+        raise Crash()
+
+    adapter.approve_plan = crash_approve
 
     try:
         await executor.advance(step, node, ctx)
@@ -245,9 +243,382 @@ async def test_agent_implement_crash(empty_store, ctx_factory):
     ref = json.loads(db_step["ref_json"])
     assert ref.get("approved") is True
 
-    # second advance
+    # restore and advance
+    adapter.approve_plan = original_approve
     approve_count_before = len([c for c in adapter.calls if c[0] == "approve_plan"])
     step.ref = ref
     await executor.advance(step, node, ctx)
     approve_count_after = len([c for c in adapter.calls if c[0] == "approve_plan"])
     assert approve_count_before == approve_count_after
+
+
+@pytest.mark.asyncio
+async def test_agent_notify_executor(empty_store, ctx_factory):
+    from harness.engine.executors.notify import NotifyExecutor
+    from harness.github.client import GitHub
+    from harness.github.outbox import Outbox
+    from harness.playbook.models import NotifyNode
+
+    adapter = FakeAdapter.happy_path()
+    ctx, run = ctx_factory(adapter)
+    ctx.outbox = Outbox(empty_store, GitHub(None))
+
+    node = NotifyNode(kind="notify", message="test message")
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="notify_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+
+    executor = NotifyExecutor()
+    res = await executor.advance(step, node, ctx)
+
+    assert res.__class__.__name__ == "Done"
+
+    ops = empty_store.query("SELECT * FROM outbox")
+    assert len(ops) == 1
+    import json
+
+    op = ops[0]
+    payload = json.loads(op["payload_json"])
+    assert op["op"] == "add_comment"
+    assert payload["repo"] == "owner/repo"
+    assert payload["issue"] == 1
+    assert "test message" in payload["body"]
+    assert op["coalesce_key"] == "notify:s1"
+
+    res = await executor.advance(step, node, ctx)
+    ops = empty_store.query("SELECT * FROM outbox")
+    assert len(ops) == 1  # Coalesced
+
+
+@pytest.mark.asyncio
+async def test_agent_plan_re_advance(empty_store, ctx_factory):
+    # a session that already exists is not restarted
+    adapter = FakeAdapter.happy_path()
+    ctx, run = ctx_factory(adapter)
+
+    key = "run-1/session_1"
+    await adapter.start(
+        StartRequest(
+            repo="owner/repo",
+            base_branch="main",
+            branch="harness/1-test",
+            issue=1,
+            title="Test",
+            brief="",
+            mode="plan_first",
+            idempotency_key=key,
+        )
+    )
+
+    node = AgentNode(kind="agent", action="plan", agent="fake", session="session_1")
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+
+    res1 = await executor.advance(step, node, ctx)
+    assert res1.__class__.__name__ == "Waiting"
+
+    starts_after_advance = len([c for c in adapter.calls if c[0] == "start"])
+    assert starts_after_advance == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_timeout(empty_store, ctx_factory):
+    adapter = FakeAdapter.happy_path()
+    ctx, run = ctx_factory(adapter)
+
+    node = AgentNode(kind="agent", action="plan", agent="fake", session="session_1", timeout="1h")
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+
+    res1 = await executor.advance(step, node, ctx)
+    step.ref = res1.ref
+
+    ctx.clock = lambda: 1000.0 + 3601
+
+    res2 = await executor.advance(step, node, ctx)
+    assert res2.__class__.__name__ == "Done"
+    assert res2.outcome == "timeout"
+    assert "timed out" in res2.output["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_revise_empty_message(empty_store, ctx_factory):
+    adapter = FakeAdapter.happy_path()
+    ctx, run = ctx_factory(adapter)
+
+    key = "run-1/session"
+    await adapter.start(
+        StartRequest(
+            repo="owner/repo",
+            base_branch="main",
+            branch="harness/1-test",
+            issue=1,
+            title="Test",
+            brief="",
+            mode="direct",
+            idempotency_key=key,
+        )
+    )
+
+    node = AgentNode(
+        kind="agent", action="revise", agent="fake", session="session", expect="plan", message="   "
+    )
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+    res1 = await executor.advance(step, node, ctx)
+    assert res1.__class__.__name__ == "Done"
+    assert res1.outcome == "failed"
+    assert "empty revise message" in res1.output["error"]
+
+
+@pytest.mark.asyncio
+async def test_agent_revise_no_session(empty_store, ctx_factory):
+    adapter = FakeAdapter.happy_path()
+    ctx, run = ctx_factory(adapter)
+
+    node = AgentNode(
+        kind="agent", action="revise", agent="fake", session="session", expect="plan", message="hello"
+    )
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+    res1 = await executor.advance(step, node, ctx)
+    assert res1.__class__.__name__ == "Done"
+    assert res1.outcome == "failed"
+    assert "no session" in res1.output["error"]
+
+
+@pytest.mark.asyncio
+async def test_agent_implement_no_session(empty_store, ctx_factory):
+    adapter = FakeAdapter.happy_path()
+    ctx, run = ctx_factory(adapter)
+
+    node = AgentNode(kind="agent", action="implement", agent="fake", session="session")
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+    res1 = await executor.advance(step, node, ctx)
+    assert res1.__class__.__name__ == "Waiting"
+    starts = [c for c in adapter.calls if c[0] == "start"]
+    assert len(starts) == 1
+    assert starts[0][1]["idempotency_key"] == "run-1/session"
+
+
+@pytest.mark.asyncio
+async def test_agent_needs_input(empty_store, ctx_factory):
+    adapter = FakeAdapter.asks_question("what do?")
+    ctx, run = ctx_factory(adapter)
+
+    node = AgentNode(kind="agent", action="plan", agent="fake", session="session_1")
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+    res1 = await executor.advance(step, node, ctx)
+    step.ref = res1.ref
+
+    res2 = await executor.advance(step, node, ctx)
+    assert res2.__class__.__name__ == "Done"
+    assert res2.outcome == "needs_input"
+    assert res2.output["question"] == "what do?"
+
+
+@pytest.mark.asyncio
+async def test_agent_failed(empty_store, ctx_factory):
+    adapter = FakeAdapter.fails("boom")
+    ctx, run = ctx_factory(adapter)
+
+    node = AgentNode(kind="agent", action="plan", agent="fake", session="session_1")
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+    res1 = await executor.advance(step, node, ctx)
+    step.ref = res1.ref
+
+    res2 = await executor.advance(step, node, ctx)
+    assert res2.__class__.__name__ == "Done"
+    assert res2.outcome == "failed"
+    assert "boom" in res2.output["error"]
+
+
+@pytest.mark.asyncio
+async def test_agent_revise_plan_ready(empty_store, ctx_factory):
+    from harness.adapters.base import AgentSnapshot, AgentState
+
+    adapter = FakeAdapter(
+        script={
+            "*": [
+                [AgentSnapshot(state=AgentState.PLAN_READY, plan="plan v1")],
+                [AgentSnapshot(state=AgentState.PLAN_READY, plan="plan v2")],
+            ]
+        }
+    )
+    ctx, run = ctx_factory(adapter)
+
+    key = "run-1/session"
+    await adapter.start(
+        StartRequest(
+            repo="owner/repo",
+            base_branch="main",
+            branch="harness/1-test",
+            issue=1,
+            title="Test",
+            brief="",
+            mode="direct",
+            idempotency_key=key,
+        )
+    )
+
+    node = AgentNode(
+        kind="agent", action="revise", agent="fake", session="session", expect="plan", message="fix"
+    )
+    step = StepRow(
+        id="s1",
+        run_id=run.id,
+        node_id="agent_1",
+        visit=1,
+        status="pending",
+        outcome=None,
+        ref=None,
+        output=None,
+        poll_after=None,
+        started_at=None,
+        ended_at=None,
+    )
+    with empty_store.tx():
+        empty_store.execute(
+            "INSERT INTO steps (id, run_id, node_id, visit, status) VALUES ('s1', 'run-1', 'agent_1', 1, 'pending')"
+        )
+
+    executor = AgentExecutor()
+    res1 = await executor.advance(step, node, ctx)
+    step.ref = res1.ref
+    assert res1.__class__.__name__ == "Waiting"
+
+    res2 = await executor.advance(step, node, ctx)
+    assert res2.__class__.__name__ == "Done"
+    assert res2.outcome == "plan_ready"
