@@ -26,6 +26,8 @@ URL_RE = re.compile(r"http://127\.0\.0\.1:(\d+)/auth\?token=(\S+)")
 def served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """`Server.run` runs only the (patched) startup, as if the socket bound, or fails to bind."""
     monkeypatch.setattr(config_module, "CONFIG_HOME", tmp_path / "config")
+    # Never read a real token (env or `gh auth token`) while serving in tests.
+    monkeypatch.setattr("harness.cli.github_token", lambda: "ghp_test-token-000000")
     save_global(GlobalConfig(port=8123, data_dir=tmp_path / "data", env_files=[]))
     state: dict = {"runs": [], "opened": [], "bound": True}
 
@@ -115,3 +117,36 @@ async def test_handle_exit_closes_the_bus_so_open_streams_end() -> None:
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(waiter, 2.0)
     assert server.should_exit is True
+
+
+WARNING = "GitHub not configured: repo playbooks and save are disabled"
+
+
+def test_serve_without_a_github_token_warns_and_still_starts(
+    served: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_token() -> str:
+        raise RuntimeError("no GitHub token: set GH_TOKEN or run `gh auth login`")
+
+    monkeypatch.setattr("harness.cli.github_token", no_token)
+    result = cli.invoke(app, ["serve", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count(WARNING) == 1
+    assert URL_RE.search(result.output)
+    assert len(served["runs"]) == 1
+    assert served["runs"][0].app.state.gh is None
+
+
+def test_serve_with_a_token_builds_the_client_and_never_prints_it(
+    served: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("harness.cli.github_token", lambda: "ghp_secret-token-123456")
+    result = cli.invoke(app, ["serve", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert WARNING not in result.output
+    assert "ghp_secret-token-123456" not in result.output
+    gh = served["runs"][0].app.state.gh
+    assert gh is not None
+    assert served["runs"][0].app.state.gh_token == "ghp_secret-token-123456"
+    assert "ghp_secret-token-123456" not in repr(gh)
+    assert type(gh._cache).__name__ == "SqliteEtagCache"

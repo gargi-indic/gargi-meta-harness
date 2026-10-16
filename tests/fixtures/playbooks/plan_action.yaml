@@ -1,0 +1,10 @@
+apiVersion: harness/v1
+id: plan-only
+nodes:
+  plan: {kind: agent, session: main, action: plan, agent: codex}
+edges:
+  plan.plan_ready: "@done"
+  plan.pr_ready: "@done"
+  plan.needs_input: "@failed"
+  plan.failed: "@failed"
+  plan.timeout: "@failed"

@@ -1,0 +1,8 @@
+apiVersion: harness/v1
+id: unrouted
+nodes:
+  implement: {kind: agent, session: main, action: implement}
+edges:
+  implement.pr_ready: "@done"
+  implement.needs_input: "@failed"
+  implement.failed: "@failed"

@@ -29,6 +29,7 @@ from harness.playbook.models import Playbook
 from harness.playbook.validate import validate
 from harness.secrets import github_token, load_env_files, redact
 from harness.store.db import Store
+from harness.store.etag_cache import SqliteEtagCache
 from harness.store.repo import (
     IssueRow,
     RunRow,
@@ -786,6 +787,16 @@ def build_server_config(application: "FastAPI", port: int) -> "uvicorn.Config":
     )
 
 
+def _serve_github(store: Store) -> tuple[GitHub | None, str | None]:
+    """The server's GitHub client and its token, or (None, None) with one warning line when there is no token."""
+    try:
+        token = github_token()
+    except RuntimeError:
+        print("GitHub not configured: repo playbooks and save are disabled")
+        return None, None
+    return GitHub(token=token, cache=SqliteEtagCache(store)), token
+
+
 @app.command()
 def serve(
     port: int = typer.Option(None, "--port", help="Port to listen on (default: the global config port)."),
@@ -810,7 +821,11 @@ def serve(
     store.migrate()
     listen_port = port if port is not None else cfg.port
     token = generate_token()
-    web = create_app(store=store, config=cfg, token=token, web_dist=default_web_dist(), port=listen_port)
+    gh, gh_token = _serve_github(store)
+    web = create_app(
+        store=store, config=cfg, token=token, web_dist=default_web_dist(), port=listen_port, gh=gh
+    )
+    web.state.gh_token = gh_token
     url = f"http://127.0.0.1:{listen_port}/auth?token={token}"
 
     def announce() -> None:
@@ -823,4 +838,9 @@ def serve(
     try:
         server.run()
     finally:
+        if gh is not None:
+            try:
+                asyncio.run(gh.aclose())
+            except Exception:
+                pass  # the client's connections belonged to the server's event loop, which is gone
         store.close()
