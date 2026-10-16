@@ -290,7 +290,9 @@ def inbox_pr(run: RunRow, steps: list[StepRow], playbook: dict[str, Any] | None)
         return None
     pr = run.context["pr"]
     url = pr.get("url") or f"https://github.com/{run.repo}/pull/{number}"
-    nodes = (playbook or {}).get("nodes") or {}
+    nodes = (playbook or {}).get("nodes")
+    if not isinstance(nodes, dict):
+        nodes = {}
     check_nodes = {nid: n for nid, n in nodes.items() if isinstance(n, dict) and n.get("kind") == "check"}
     latest = {nid: _latest(steps, {nid}) for nid in check_nodes}
     checks = [
@@ -308,9 +310,9 @@ def inbox_pr(run: RunRow, steps: list[StepRow], playbook: dict[str, Any] | None)
             and isinstance(failed, list)
         ):
             checks.extend(
-                InboxCheck(name=str(f.get("name")), state=str(f.get("conclusion")))
+                InboxCheck(name=str(f["name"]), state=str(f.get("conclusion") or "unknown"))
                 for f in failed
-                if isinstance(f, dict)
+                if isinstance(f, dict) and f.get("name")
             )
     return InboxPr(number=number, url=str(url), checks=checks)
 

@@ -48,7 +48,7 @@ async def list_runs_route(
 async def run_activity(
     run_id: str,
     store: Annotated[Store, Depends(get_store)],
-    after: Annotated[int, Query(ge=0)] = 0,
+    after: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> ActivityPage:
     if get_run(store, run_id) is None:
