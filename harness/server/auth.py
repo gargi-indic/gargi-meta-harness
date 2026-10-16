@@ -48,8 +48,8 @@ class TokenGuard:
             await self.app(scope, receive, send)
             return
         request = Request(scope)
-        host = request.headers.get("host")
-        if host is None or host.lower() not in self.allowed_hosts:
+        hosts = request.headers.getlist("host")
+        if len(hosts) != 1 or hosts[0].lower() not in self.allowed_hosts:
             await PlainTextResponse("bad host", status_code=400)(scope, receive, send)
             return
         if _is_api_path(scope["path"]) and not token_matches(request.cookies.get(COOKIE), self.token):

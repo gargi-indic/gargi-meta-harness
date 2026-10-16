@@ -30,7 +30,7 @@ def register_static(app: FastAPI, web_dist: Path | None) -> None:
     """Add the catch-all GET route. Register it last: ``/auth`` and ``/api/*`` are declared before it."""
     root = web_dist.resolve() if web_dist is not None and web_dist.is_dir() else None
 
-    @app.get("/{path:path}", include_in_schema=False)
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def static_files(path: str) -> Response:
         if root is None:
             return PlainTextResponse(NOT_BUILT, status_code=503)

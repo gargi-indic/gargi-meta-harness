@@ -14,18 +14,11 @@ from harness import __version__
 from harness.config import GlobalConfig
 from harness.server.auth import COOKIE, TokenGuard, generate_token, token_matches
 from harness.server.deps import get_bus, get_config
-from harness.server.events import EventBus, EventLogTailer, sse_stream
+from harness.server.events import EventBus, EventLogTailer, parse_last_event_id, sse_stream
 from harness.server.static import register_static
 from harness.store.db import Store
 
 _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
-
-
-def _last_event_id(request: Request) -> int | None:
-    try:
-        return int(request.headers["last-event-id"])
-    except (KeyError, ValueError):
-        return None
 
 
 def create_app(
@@ -81,7 +74,8 @@ def create_app(
 
     @app.get("/api/events")
     async def events(request: Request, event_bus: Annotated[EventBus, Depends(get_bus)]) -> StreamingResponse:
-        stream = sse_stream(event_bus, _last_event_id(request), keepalive_s=request.app.state.keepalive_s)
+        last_event_id = parse_last_event_id(request.headers.get("last-event-id"), event_bus.last_seq)
+        stream = sse_stream(event_bus, last_event_id, keepalive_s=request.app.state.keepalive_s)
         return StreamingResponse(
             stream,
             media_type="text/event-stream",

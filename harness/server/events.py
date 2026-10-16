@@ -91,6 +91,28 @@ class EventBus:
             self._queues.discard(queue)
 
 
+def _redact_value(value: Any) -> Any:
+    """Redact every string (keys included) in a decoded JSON value, so JSON escaping cannot hide a secret."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {_redact_value(key): _redact_value(item) for key, item in value.items()}
+    return value
+
+
+def parse_last_event_id(value: str | None, last_seq: int) -> int | None:
+    """The ``Last-Event-ID`` header as an int; invalid, or newer than the bus (an earlier launch), is None."""
+    try:
+        parsed = int(value) if value is not None else None
+    except ValueError:
+        return None
+    if parsed is not None and parsed > last_seq:
+        return None
+    return parsed
+
+
 def format_sse(event: ServerEvent) -> str:
     payload = json.dumps(event.data, separators=(",", ":"), ensure_ascii=False)
     return f"id: {event.seq}\nevent: {event.type}\ndata: {payload}\n\n"
@@ -141,6 +163,23 @@ class EventLogTailer:
             start_after = store.query("SELECT COALESCE(MAX(id), 0) AS last FROM events")[0]["last"]
         self._after: int = start_after
 
+    def _publish_row(self, row: dict[str, Any]) -> bool:
+        """Publish one row; a row that cannot be published is logged and skipped, never retried."""
+        try:
+            payload = {key: row[key] for key in ("id", "ts", "repo", "issue", "run_id", "kind")}
+            payload["data"] = row["data"]
+            self._bus.publish(row["kind"], _redact_value(payload))
+        except Exception as exc:
+            log.warning(
+                "event %s skipped, it could not be published: %s",
+                row.get("id"),
+                redact(f"{type(exc).__name__}: {exc}"),
+            )
+            return False
+        finally:
+            self._after = row["id"]
+        return True
+
     async def poll_once(self) -> int:
         """Publish the rows after the last one seen; returns how many. A failure is logged and retried."""
         published = 0
@@ -148,12 +187,8 @@ class EventLogTailer:
             while True:
                 rows = events_since(self._store, self._after, limit=_PAGE)
                 for row in rows:
-                    payload = {key: row[key] for key in ("id", "ts", "repo", "issue", "run_id", "kind")}
-                    payload["data"] = row["data"]
-                    safe = json.loads(redact(json.dumps(payload, ensure_ascii=False)))
-                    self._bus.publish(row["kind"], safe)
-                    self._after = row["id"]
-                    published += 1
+                    if self._publish_row(row):
+                        published += 1
                 if len(rows) < _PAGE:
                     break
         except Exception as exc:

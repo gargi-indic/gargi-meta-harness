@@ -63,7 +63,17 @@ async def test_auth_sets_the_session_cookie_and_redirects() -> None:
 @pytest.mark.parametrize("path", ["/api/health", "/auth", "/"])
 async def test_host_guard_rejects_foreign_hosts(path: str) -> None:
     async with make_client(make_app()) as client:
-        for host in ("evil.example", "127.0.0.1:9999", "127.0.0.1", "localhost"):
+        for host in (
+            "evil.example",
+            "127.0.0.1:9999",
+            "127.0.0.1",
+            "localhost",
+            "localhost.:7777",
+            "[::1]:7777",
+            "127.0.0.1:7777, evil.example",
+            "127.0.0.1:7777,127.0.0.1:7777",
+            "",
+        ):
             response = await client.get(path, headers={"Host": host, **COOKIE})
             assert response.status_code == 400, host
             assert response.text == "bad host"
@@ -96,3 +106,46 @@ async def test_docs_and_openapi_are_not_served() -> None:
     async with make_client(make_app()) as client:
         for path in ("/docs", "/redoc", "/openapi.json"):
             assert (await client.get(path)).status_code == 503  # static fallback: no web build
+
+
+async def _raw_request(app, headers: list[tuple[bytes, bytes]], path: str = "/api/health") -> dict:
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+        "server": ("127.0.0.1", 7777),
+        "client": ("127.0.0.1", 50000),
+    }
+    await app(scope, receive, send)
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return {"status": start["status"], "body": body}
+
+
+async def test_host_guard_rejects_a_missing_host_header() -> None:
+    cookie = (b"cookie", f"harness_token={TOKEN}".encode())
+    for path in ("/api/health", "/auth", "/"):
+        response = await _raw_request(make_app(), [cookie], path)
+        assert response == {"status": 400, "body": b"bad host"}, path
+
+
+async def test_host_guard_rejects_duplicate_host_headers() -> None:
+    cookie = (b"cookie", f"harness_token={TOKEN}".encode())
+    host = (b"host", b"127.0.0.1:7777")
+    response = await _raw_request(make_app(), [host, (b"host", b"evil.example"), cookie])
+    assert response["status"] == 400
+    assert (await _raw_request(make_app(), [host, cookie]))["status"] == 200

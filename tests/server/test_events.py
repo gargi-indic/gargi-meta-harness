@@ -3,7 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 
-from harness.server.events import EventBus, ServerEvent, sse_stream
+from harness.server.events import EventBus, ServerEvent, parse_last_event_id, sse_stream
 from tests.server.helpers import TOKEN, make_app, make_client
 
 TIMEOUT = 2.0
@@ -173,3 +173,34 @@ async def test_events_route_ignores_an_invalid_last_event_id_and_needs_auth() ->
     assert anonymous.status_code == 401
     assert response.status_code == 200
     assert response.text == ""  # invalid id means live only, and the closed bus has nothing live
+
+
+def test_parse_last_event_id() -> None:
+    assert parse_last_event_id(None, 5) is None
+    assert parse_last_event_id("abc", 5) is None
+    assert parse_last_event_id("3", 5) == 3
+    assert parse_last_event_id("5", 5) == 5
+    assert parse_last_event_id("6", 5) is None  # from an earlier launch: live only
+    assert parse_last_event_id("99", 0) is None
+
+
+async def test_events_route_treats_a_stale_last_event_id_as_live_only() -> None:
+    seen: list[int | None] = []
+
+    class SpyBus(EventBus):
+        def subscribe(self, last_event_id=None):
+            seen.append(last_event_id)
+            return super().subscribe(last_event_id)
+
+    bus = SpyBus(clock=lambda: FIXED)
+    bus.publish("one", {})
+    bus.close()
+    async with make_client(make_app(bus=bus)) as client:
+        for header in ("99", "1"):
+            await asyncio.wait_for(
+                client.get(
+                    "/api/events", headers={"Cookie": f"harness_token={TOKEN}", "Last-Event-ID": header}
+                ),
+                TIMEOUT,
+            )
+    assert seen == [None, 1]

@@ -74,3 +74,11 @@ def test_default_web_dist_points_at_the_checkout_web_dist(
     assert default_web_dist() is None
     (tmp_path / "web" / "dist").mkdir(parents=True)
     assert default_web_dist() == (tmp_path / "web" / "dist").resolve()
+
+
+async def test_head_requests_are_served(dist: Path) -> None:
+    async with make_client(make_app(web_dist=dist)) as client:
+        root = await client.head("/")
+        asset = await client.head("/assets/app.js")
+    assert root.status_code == asset.status_code == 200
+    assert root.text == ""

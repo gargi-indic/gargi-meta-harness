@@ -770,10 +770,20 @@ def playbook_list() -> None:
 
 
 def build_server_config(application: "FastAPI", port: int) -> "uvicorn.Config":
-    """The uvicorn config; the host is fixed to loopback on purpose (no ``--host`` option)."""
+    """The uvicorn config; the host is fixed to loopback on purpose (no ``--host`` option).
+
+    The access log is off because it would write ``GET /auth?token=...`` (the launch token) to the terminal.
+    """
     import uvicorn
 
-    return uvicorn.Config(application, host="127.0.0.1", port=port, log_level="info")
+    return uvicorn.Config(
+        application,
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+        access_log=False,
+        timeout_graceful_shutdown=3,
+    )
 
 
 @app.command()
@@ -785,10 +795,9 @@ def serve(
     """Serve the local web UI on 127.0.0.1 and print the one-time login URL."""
     import webbrowser
 
-    import uvicorn
-
     from harness.server import create_app
     from harness.server.auth import generate_token
+    from harness.server.runner import HarnessServer
     from harness.server.static import default_web_dist
 
     if with_daemon:
@@ -803,10 +812,15 @@ def serve(
     token = generate_token()
     web = create_app(store=store, config=cfg, token=token, web_dist=default_web_dist(), port=listen_port)
     url = f"http://127.0.0.1:{listen_port}/auth?token={token}"
-    print(url, flush=True)
-    if not no_open:
-        webbrowser.open(url)
+
+    def announce() -> None:
+        # Only after the socket is bound: a port clash must never hand the token to another process.
+        print(url, flush=True)
+        if not no_open:
+            webbrowser.open(url)
+
+    server = HarnessServer(build_server_config(web, listen_port), bus=web.state.bus, on_started=announce)
     try:
-        uvicorn.Server(build_server_config(web, listen_port)).run()
+        server.run()
     finally:
         store.close()

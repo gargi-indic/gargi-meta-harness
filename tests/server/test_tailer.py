@@ -1,9 +1,11 @@
 """EventLogTailer: SQLite event log to the bus, exactly once, redacted (M2.1)."""
 
 import asyncio
+from functools import partial
 
 import pytest
 
+from harness.server import app as app_module
 from harness.server import events as events_module
 from harness.server.events import EventBus, EventLogTailer
 from harness.store.repo import append_event
@@ -115,23 +117,68 @@ async def test_run_polls_then_sleeps_until_cancelled() -> None:
     assert [e.type for e in await buffered(bus)] == ["late"]
 
 
-async def test_lifespan_starts_the_tailer_and_closes_the_bus() -> None:
+async def test_lifespan_runs_the_tailer_and_stops_it_with_the_bus(monkeypatch: pytest.MonkeyPatch) -> None:
     store = make_store()
     bus = EventBus()
-    app = make_app(store=store, bus=bus, tail_events=True, tail_interval_s=0.001)
-    seen: list[str] = []
+    slept = asyncio.Event()
+    go = asyncio.Event()
+    state = {"cancelled": False}
 
-    async def listen() -> None:
-        async for event in bus.subscribe(None):
-            seen.append(event.type)
+    async def gated_sleep(_seconds: float) -> None:
+        slept.set()
+        try:
+            await go.wait()
+            go.clear()  # one tick per release
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
 
+    monkeypatch.setattr(app_module, "EventLogTailer", partial(EventLogTailer, sleep=gated_sleep))
+    app = make_app(store=store, bus=bus, tail_events=True)
     async with app.router.lifespan_context(app):
-        listener = asyncio.create_task(listen())
-        await asyncio.sleep(0)
+        await asyncio.wait_for(slept.wait(), TIMEOUT)  # first poll done, tailer is sleeping
+        assert bus.last_seq == 0
+        slept.clear()
         append_event(store, kind="while_serving", data={})
-        for _ in range(500):
-            if seen:
-                break
-            await asyncio.sleep(0.001)
-    await asyncio.wait_for(listener, TIMEOUT)  # the bus was closed on shutdown
-    assert seen == ["while_serving"]
+        go.set()
+        await asyncio.wait_for(slept.wait(), TIMEOUT)  # second poll done
+        assert bus.last_seq == 1
+    assert state["cancelled"] is True
+    assert [e.type for e in await buffered(bus)] == ["while_serving"]  # and the bus was closed
+
+
+async def test_a_row_that_cannot_be_published_is_skipped_not_retried(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("JULES_API_KEY", SECRET)
+
+    class PickyBus(EventBus):
+        def publish(self, type: str, data):
+            if type == "poison":
+                raise ValueError(f"cannot serialise {SECRET}")
+            return super().publish(type, data)
+
+    store = make_store()
+    bus = PickyBus()
+    tailer = EventLogTailer(store, bus)
+    append_event(store, kind="good1", data={})
+    append_event(store, kind="poison", data={})
+    append_event(store, kind="good2", data={})
+    assert await tailer.poll_once() == 2
+    assert await tailer.poll_once() == 0
+    assert [e.type for e in await buffered(bus)] == ["good1", "good2"]
+    assert "skipped" in caplog.text
+    assert SECRET not in caplog.text
+
+
+async def test_redaction_walks_decoded_strings(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = 'pa"ss\\word-0123456789'  # JSON escaping would change this text
+    monkeypatch.setenv("JULES_API_KEY", secret)
+    store = make_store()
+    bus = EventBus()
+    tailer = EventLogTailer(store, bus)
+    append_event(store, kind="agent_output", data={"text": f"x {secret} y", secret: [secret, 3, None]})
+    await tailer.poll_once()
+    (event,) = await buffered(bus)
+    assert secret not in event.model_dump_json()
+    assert event.data["data"] == {"text": "x [redacted] y", "[redacted]": ["[redacted]", 3, None]}
