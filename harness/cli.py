@@ -8,7 +8,7 @@ import signal
 import socket
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 import yaml
@@ -44,6 +44,10 @@ from harness.store.repo import (
     steps_for_run,
 )
 from harness.sync import sync_repo
+
+if TYPE_CHECKING:
+    import uvicorn
+    from fastapi import FastAPI
 
 app = typer.Typer(help="Gargi Harness CLI")
 
@@ -760,3 +764,63 @@ def playbook_list() -> None:
     playbooks = builtin_playbooks()
     for pb_id in playbooks:
         print(pb_id)
+
+
+# ---- web UI ----------------------------------------------------------------------------------------------
+
+
+def build_server_config(application: "FastAPI", port: int) -> "uvicorn.Config":
+    """The uvicorn config; the host is fixed to loopback on purpose (no ``--host`` option).
+
+    The access log is off because it would write ``GET /auth?token=...`` (the launch token) to the terminal.
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        application,
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+        access_log=False,
+        timeout_graceful_shutdown=3,
+    )
+
+
+@app.command()
+def serve(
+    port: int = typer.Option(None, "--port", help="Port to listen on (default: the global config port)."),
+    no_open: bool = typer.Option(False, "--no-open", help="Print the login URL without opening a browser."),
+    with_daemon: bool = typer.Option(False, "--with-daemon", help="Not implemented yet."),
+) -> None:
+    """Serve the local web UI on 127.0.0.1 and print the one-time login URL."""
+    import webbrowser
+
+    from harness.server import create_app
+    from harness.server.auth import generate_token
+    from harness.server.runner import HarnessServer
+    from harness.server.static import default_web_dist
+
+    if with_daemon:
+        print("--with-daemon is not implemented yet; run `harness daemon` separately")
+        raise typer.Exit(2)
+    cfg = load_global()
+    load_env_files(cfg.env_files)
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = Store(cfg.db_path)
+    store.migrate()
+    listen_port = port if port is not None else cfg.port
+    token = generate_token()
+    web = create_app(store=store, config=cfg, token=token, web_dist=default_web_dist(), port=listen_port)
+    url = f"http://127.0.0.1:{listen_port}/auth?token={token}"
+
+    def announce() -> None:
+        # Only after the socket is bound: a port clash must never hand the token to another process.
+        print(url, flush=True)
+        if not no_open:
+            webbrowser.open(url)
+
+    server = HarnessServer(build_server_config(web, listen_port), bus=web.state.bus, on_started=announce)
+    try:
+        server.run()
+    finally:
+        store.close()

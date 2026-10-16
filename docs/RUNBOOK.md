@@ -205,3 +205,18 @@ The harness sends at most 40 writes a minute, spaces writes by one second and ho
 ### Slash commands are ignored
 
 Only `command_users` (or the repo owner when the list is empty) may command; others get a "command ignored" reply. A command must be the first non-empty line of the comment and the run must still be active. Commands are read by the daemon, so with only `harness run` in the foreground they wait.
+
+## 5. Web UI
+
+```bash
+harness serve              # listens on 127.0.0.1:<port from config.toml, default 7777>
+harness serve --port 8080 --no-open
+```
+
+`harness serve` prints one login URL, `http://127.0.0.1:<port>/auth?token=<token>`, and opens it in your browser unless you pass `--no-open`.
+
+- **Token:** a new random token is generated on every launch and kept in memory only (never written to disk or logged). Opening the URL sets an `HttpOnly`, `SameSite=Strict` session cookie and redirects to `/`; every `/api/*` request needs that cookie. Restarting the server invalidates the old cookie, so open the new URL.
+- **Local only:** the server binds `127.0.0.1` (there is no `--host` option) and rejects any request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` (DNS-rebinding guard). It sends no CORS headers.
+- **Live events:** `GET /api/events` is a Server-Sent Events stream fed from the SQLite event log, so it works while `harness daemon` runs as a separate process and shares `~/.gargi-harness/harness.db`. Events from before the server started are not replayed.
+- **Static files:** the built UI is served from `web/dist` of the checkout. Without it the server answers `503 web build not found: run npm run build in web/`; the API still works.
+- `--with-daemon` is reserved and currently refused; run `harness daemon` in another terminal.
