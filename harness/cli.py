@@ -1,18 +1,24 @@
 """CLI entrypoint for Gargi Harness."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Literal
 
 import typer
 import yaml
 
 from harness import __version__
+from harness.adapters.base import AdapterRegistry
 from harness.config import RepoConfig, RepoEntry, load_global, save_global
 from harness.dag import blocked, ready_set
+from harness.engine import ExecutorRegistry, Runner
 from harness.github.client import GitHub
+from harness.github.commands import decide, default_retry_node, resolve_gate
 from harness.github.labels import ensure_harness_labels
+from harness.github.outbox import Outbox
 from harness.secrets import github_token, load_env_files
 from harness.store.db import Store
-from harness.store.repo import get_repo, list_issues, list_runs
+from harness.store.repo import get_repo, get_run, list_issues, list_runs, pending_gates
 from harness.sync import sync_repo
 
 app = typer.Typer(help="Gargi Harness CLI")
@@ -163,6 +169,164 @@ def status(repo: str = typer.Argument(None)) -> None:
         print(f"ready: {ready_str_list}")
     finally:
         store.close()
+
+
+# ---- gates and run controls ------------------------------------------------------------------------------
+
+
+def _fail(message: str) -> typer.Exit:
+    print(message)
+    return typer.Exit(1)
+
+
+def _open_store() -> Store:
+    path = load_global().db_path
+    if not path.exists():
+        raise _fail("not synced: run harness sync")
+    store = Store(path)
+    store.migrate()
+    return store
+
+
+def _error_message(exc: Exception) -> str:
+    return str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+
+
+def _control_runner(store: Store) -> tuple[Runner, GitHub]:
+    """A runner for controls only: the outbox just enqueues (a daemon drains it), so no real token is needed."""
+    configs: dict[str, RepoConfig] = {}
+    for row in store.query("SELECT full_name FROM repos"):
+        stored = get_repo(store, row["full_name"])
+        try:
+            configs[row["full_name"]] = RepoConfig.model_validate((stored or {}).get("config") or {})
+        except ValueError:
+            continue  # an unreadable stored config falls back to the defaults
+    gh = GitHub(token="unused")
+    runner = Runner(store, Outbox(store, gh), ExecutorRegistry(), AdapterRegistry(), repo_configs=configs)
+    return runner, gh
+
+
+def _single_repo(repo: str | None) -> str | None:
+    if repo:
+        return repo
+    repos = load_global().repos
+    return repos[0].name if len(repos) == 1 else None
+
+
+@app.command()
+def gates(repo: str = typer.Option(None, "--repo", help="Only gates of this repo.")) -> None:
+    """List pending gates."""
+    store = _open_store()
+    try:
+        print(f"{'GATE':<40} {'RUN':<20} {'ISSUE':<7} {'NAME':<12} CREATED")
+        for gate in pending_gates(store):
+            run = get_run(store, gate.run_id)
+            if repo and (run is None or run.repo != repo):
+                continue
+            issue = f"#{run.issue}" if run else "-"
+            print(f"{gate.id:<40} {gate.run_id:<20} {issue:<7} {gate.name:<12} {gate.created_at}")
+    finally:
+        store.close()
+
+
+def _decide(ref: str, status: Literal["approved", "rejected"], note: str | None, repo: str | None) -> None:
+    store = _open_store()
+    try:
+        gate = resolve_gate(store, _single_repo(repo), ref)
+        decide(store, gate.id, status, note, "cli")
+        print(f"{status}: {gate.id}")
+    except (KeyError, ValueError) as exc:
+        raise _fail(_error_message(exc)) from None
+    finally:
+        store.close()
+
+
+@app.command()
+def approve(
+    ref: str = typer.Argument(..., help="Gate id, or an issue number (needs --repo)."),
+    note: str = typer.Option(None, "--note", help="Optional note."),
+    repo: str = typer.Option(None, "--repo"),
+) -> None:
+    """Approve a pending gate."""
+    _decide(ref, "approved", note, repo)
+
+
+@app.command()
+def reject(
+    ref: str = typer.Argument(..., help="Gate id, or an issue number (needs --repo)."),
+    note: str = typer.Option(..., "--note", help="Why the gate is rejected."),
+    repo: str = typer.Option(None, "--repo"),
+) -> None:
+    """Reject a pending gate."""
+    _decide(ref, "rejected", note, repo)
+
+
+def _control(action: Callable[[Runner], Awaitable[str]]) -> None:
+    store = _open_store()
+    runner, gh = _control_runner(store)
+
+    async def _go() -> str:
+        try:
+            return await action(runner)
+        finally:
+            await gh.aclose()
+
+    try:
+        print(asyncio.run(_go()))
+    except (KeyError, ValueError) as exc:
+        raise _fail(_error_message(exc)) from None
+    finally:
+        store.close()
+
+
+@app.command()
+def pause(run: str) -> None:
+    """Pause a run."""
+
+    async def action(runner: Runner) -> str:
+        runner.pause(run)
+        return f"paused: {run}"
+
+    _control(action)
+
+
+@app.command()
+def resume(
+    run: str,
+    to: str = typer.Option(None, "--to", help="Resume at this node (a human override)."),
+) -> None:
+    """Resume a paused run, or restart it at a node."""
+
+    async def action(runner: Runner) -> str:
+        runner.resume(run, to=to)
+        return f"resumed: {run}" + (f" at {to}" if to else "")
+
+    _control(action)
+
+
+@app.command()
+def cancel(run: str) -> None:
+    """Cancel a run."""
+
+    async def action(runner: Runner) -> str:
+        await runner.cancel(run)
+        return f"cancelled: {run}"
+
+    _control(action)
+
+
+@app.command()
+def retry(run: str, node: str = typer.Argument(None, help="Node to retry (default: latest failed).")) -> None:
+    """Retry a node of a run."""
+
+    async def action(runner: Runner) -> str:
+        if get_run(runner.store, run) is None:
+            raise KeyError(f"run {run} not found")
+        target = node or default_retry_node(runner.store, run)
+        runner.retry_node(run, target)
+        return f"retry: {run} {target}"
+
+    _control(action)
 
 
 playbook_app = typer.Typer(help="Playbook commands")
