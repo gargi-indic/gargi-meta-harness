@@ -1,0 +1,88 @@
+Binding details for #23 (M2.1 FastAPI server skeleton, token-cookie auth, static serving, SSE). These override the issue where they differ. Read the real signatures on main first; reuse merged code, do not re-implement it. If something named here does not exist, use the closest existing API and list it in the PR body.
+Merged code to reuse: `harness/store/db.py` (`Store`), `harness/store/repo.py` (`events_since(store, after_id, limit=500)`, `append_event`), `harness/config.py` (`GlobalConfig`: `port` default 7777, `repos`, `env_files`, `db_path`; `load_global`), `harness/secrets.py` (`redact`, `load_env_files`), `harness/cli.py` (typer `app`), `harness/__init__.py` (`__version__`).
+
+## 1. Files
+- `harness/server/__init__.py` (exports `create_app`), `harness/server/app.py`, `harness/server/deps.py`, `harness/server/auth.py`, `harness/server/events.py`, `harness/server/static.py`
+- `harness/cli.py`: add the `serve` command only.
+- `pyproject.toml` + `uv.lock`: add `fastapi>=0.115.0` and `uvicorn>=0.30.0` (plain `uvicorn`, NOT `uvicorn[standard]`). No `sse-starlette`: hand-roll SSE with `StreamingResponse`. No other new deps.
+- `docs/RUNBOOK.md`: a short "Web UI" section.
+- Tests: `tests/server/__init__.py`, `tests/server/test_auth.py`, `tests/server/test_events.py`, `tests/server/test_tailer.py`, `tests/server/test_static.py`, `tests/server/test_serve_cli.py`.
+Do NOT touch `harness/store/*` (the existing `events_since` is the tailer's query; do not add `events_after`), the engine, adapters, `web/`, `.github/`, `.orchestrator/`, `.claude/`, `docs/PLAN.md`.
+
+## 2. `harness/server/app.py`
+```python
+def create_app(*, store: Store, config: GlobalConfig, token: str | None = None, web_dist: Path | None = None,
+               port: int | None = None, bus: EventBus | None = None, tail_events: bool = True,
+               keepalive_s: float = 15.0, tail_interval_s: float = 0.5) -> FastAPI
+```
+- `token=None` → `generate_token()`. `port=None` → `config.port`. `bus=None` → `EventBus()`.
+- `app.state`: `store`, `config`, `bus`, `token`, `port`, `keepalive_s`. `deps.py` has `get_store(request)`, `get_config(request)`, `get_bus(request)` reading `request.app.state` (later tasks override via `app.dependency_overrides`).
+- Lifespan: when `tail_events` is true, start an `EventLogTailer(store, bus, interval_s=tail_interval_s)` task on startup and cancel/await it on shutdown; on shutdown also `bus.close()`.
+- Routes: `GET /auth`, `GET /api/health`, `GET /api/events`, static/SPA (§5). Any other `/api/*` path → JSON 404 (after auth). No CORS middleware, no CORS headers. `docs_url=None, redoc_url=None, openapi_url=None`.
+- `GET /api/health` → `{"status": "ok", "version": harness.__version__, "repo_count": len(config.repos)}`.
+
+## 3. `harness/server/auth.py`
+- `generate_token() -> str` = `secrets.token_urlsafe(32)`.
+- `COOKIE = "harness_token"`.
+- Host guard (pure ASGI or `@app.middleware("http")`, applied to EVERY path incl. `/auth` and static): allowed `Host` header values are exactly `127.0.0.1:<port>` and `localhost:<port>` (case-insensitive host part). Anything else, or a missing Host → `400` plain text `bad host`.
+- API auth: every `/api/*` request needs cookie `harness_token` with `hmac.compare_digest(cookie.encode(), token.encode())`; missing or wrong → `401` JSON `{"detail": "unauthorized"}`. Static paths and `/auth` need no cookie.
+- `GET /auth?token=<t>`: missing/wrong (constant-time) → `403` JSON `{"detail": "forbidden"}` and NO `Set-Cookie`. Right → `303` redirect to `/` with `Set-Cookie: harness_token=<token>; HttpOnly; SameSite=Strict; Path=/` (no `Secure`: plain http on loopback; no `Max-Age`: session cookie).
+
+## 4. `harness/server/events.py`
+```python
+class ServerEvent(BaseModel):  # pydantic, extra="forbid"
+    seq: int; type: str; data: dict[str, Any]; ts: str     # ts: ISO-8601 UTC from an injected clock
+
+class EventBus:
+    def __init__(self, *, buffer_size: int = 500, clock: Callable[[], datetime] | None = None) -> None
+    def publish(self, type: str, data: dict[str, Any]) -> int        # seq starts at 1, +1 per publish
+    def subscribe(self, last_event_id: int | None = None) -> AsyncIterator[ServerEvent]
+    def close(self) -> None                                           # ends every subscription (iterators stop) and later subscribe() calls replay then stop
+    @property
+    def last_seq(self) -> int
+```
+- Ring buffer of the last `buffer_size` events (`collections.deque(maxlen=...)`).
+- `subscribe(None)`: live events only. `subscribe(n)`: first every buffered event with `seq > n` in order, then live events; no gap and no duplicate between replay and live (register the subscriber queue before snapshotting the buffer, then skip seq <= last replayed). If `n` is older than the buffer, replay what is buffered.
+- Per-subscriber `asyncio.Queue`; publish never blocks (unbounded queue is fine for M2).
+- `async def sse_stream(bus, last_event_id: int | None, *, keepalive_s: float) -> AsyncIterator[str]`: yields `f"id: {e.seq}\nevent: {e.type}\ndata: {json}\n\n"` per event (json compact, `ensure_ascii=False`, data is `e.data`), and `": keepalive\n\n"` whenever `keepalive_s` passes with no event. Ends when the bus is closed.
+- `GET /api/events`: parse `Last-Event-ID` header (int; invalid → treat as None), return `StreamingResponse(sse_stream(...), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})`.
+- `class EventLogTailer`:
+```python
+    def __init__(self, store: Store, bus: EventBus, *, interval_s: float = 0.5, start_after: int | None = None,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None
+    async def poll_once(self) -> int            # publishes new rows, returns how many
+    async def run(self) -> None                 # loop: poll_once(); await sleep(interval_s); until cancelled
+```
+  - `start_after=None` → the current `MAX(id)` of `events` (0 if empty) read at construction, so history is not replayed on launch.
+  - Uses `events_since(store, self._after, limit=500)`; for each row publishes `type=row["kind"]`, `data={"id", "ts", "repo", "issue", "run_id", "kind", "data"}` from the row, after redaction: `json.loads(redact(json.dumps(payload)))`. Advances `_after` to the row id after each publish (each row exactly once, in id order, also across polls and when >500 rows are pending).
+  - A store error in `poll_once` is logged (redacted) and retried next tick; `run` never dies on it.
+
+## 5. Static serving (`harness/server/static.py`)
+- `web_dist=None` or not a directory: any non-`/api` GET (incl. `/`) → `503` text/plain `web build not found: run \`npm run build\` in web/`.
+- Otherwise for non-`/api` GETs: if the path resolves to a file INSIDE `web_dist` (resolve and check `is_relative_to`; reject traversal) serve it (`FileResponse`), else serve `web_dist/index.html` (SPA fallback). `/auth` and `/api/*` are never shadowed.
+- `default_web_dist() -> Path | None`: `Path(harness.__file__).resolve().parent.parent / "web" / "dist"` if it is a directory, else None.
+
+## 6. `harness serve [--port INT] [--no-open] [--with-daemon]`
+- Split for testing: `def build_server_config(app: FastAPI, port: int) -> uvicorn.Config` returns `uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")`. Host is hard-coded; no `--host` option.
+- The command: `cfg = load_global()`, `load_env_files(cfg.env_files)`, `Store(cfg.db_path)` + `migrate()` (mkdir parent), `token = generate_token()`, `create_app(store=..., config=cfg, token=token, web_dist=default_web_dist(), port=port)`, print `http://127.0.0.1:<port>/auth?token=<token>`, `webbrowser.open(url)` unless `--no-open`, then `uvicorn.Server(config).run()`.
+  The launch token is printed once on purpose (that is how the user logs in); never log it anywhere else.
+- `--with-daemon` → exit code 2 with `--with-daemon is not implemented yet; run \`harness daemon\` separately`.
+- Does NOT call `build_app` and needs no GitHub token.
+
+## 7. Tests (pytest, no network, no real sockets, no sleeping for real)
+Use `httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:7777")` (matching port); `tail_events=False` except in tailer tests. Store: `Store(":memory:")` + `migrate()` or a `tmp_path` db. Isolate config like `tests/test_cli_gates.py` (monkeypatch `harness.config.CONFIG_HOME`); no test writes outside `tmp_path`.
+1. health: no cookie 401; wrong cookie 401; right cookie 200 with the documented body (repo_count from a config with 2 repos).
+2. unknown `/api/nope` with cookie → 404; without cookie → 401.
+3. `/auth?token=wrong` → 403, no `set-cookie`; `/auth` with no token → 403; right token → 303, `location: /`, cookie attributes `HttpOnly`, `SameSite=Strict`, `Path=/` (parse the header).
+4. Host guard: `Host: evil.example` → 400 on `/api/health`, on `/auth`, on `/`; `Host: localhost:7777` → allowed; `Host: 127.0.0.1:9999` (wrong port) → 400.
+5. No `access-control-allow-origin` header on any response, including when an `Origin` header is sent.
+6. EventBus: seqs 1..3; `subscribe(1)` gets 2, 3 then a later live 4; `subscribe(None)` gets only live; buffer_size=3 with 5 events and `subscribe(0)` replays 3,4,5; an event published between replay and live is neither lost nor duplicated (publish from inside the consumer after the first replayed item); `close()` ends iteration.
+7. `sse_stream`: exact wire format for one event (id/event/data lines, blank line); keepalive emitted with `keepalive_s=0.01` and no events (bounded by `asyncio.wait_for`, no real long sleeps).
+8. `/api/events` route: publish 2 events, `bus.close()`, then GET with cookie and `Last-Event-ID: 1` → 200, `content-type` starts with `text/event-stream`, body contains only event 2 (works because the stream ends when the bus is closed; ASGITransport buffers).
+9. Tailer: rows appended with `append_event` after construction are published exactly once each in order across two `poll_once` calls; rows existing before construction are not published; 600 pending rows are all published (paging past 500); a payload containing a secret (monkeypatch `JULES_API_KEY` to a 12+ char value) is redacted in the published data; a store error in one poll does not stop the next.
+10. Static: temp `web_dist` with `index.html` and `assets/app.js`: `/` → index; `/assets/app.js` → the file; `/runs/abc` → index (fallback); `/../pyproject.toml` / `/%2e%2e/secret` → not outside the dir (index or 404, never the file); no `web_dist` → 503 with the message.
+11. CLI: `harness serve --help` exits 0; `build_server_config(app, 7777).host == "127.0.0.1"`; `serve --with-daemon` exits 2 with the message; `serve --no-open` with `uvicorn.Server.run` and `webbrowser.open` monkeypatched: prints the auth URL with port from config, does not open the browser, calls run once; without `--no-open` opens exactly that URL.
+All of `uv run ruff format --check .`, `uv run ruff check .`, `uv run pytest -q` must pass. Paste the raw tail of the pytest output in the PR body.
+
+## 8. Do not add
+Domain endpoints (campaigns/runs/inbox/actions/playbooks), CORS, a `--host` option, websockets, `sse-starlette`, `uvicorn[standard]`, daemon-in-server wiring, any web/ code, auth beyond the single launch token, persisting the token to disk.
