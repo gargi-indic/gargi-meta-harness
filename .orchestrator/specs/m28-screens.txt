@@ -1,0 +1,115 @@
+Binding details for #28 (M2.6 Campaigns / Board / Inbox screens). Where these differ from the issue, these win. Read the real code on main first, and reuse it instead of re-implementing it:
+- `web/` from #26: `src/ui/*` (Button, StatusTag + TONE_COLOR, Panel, DataTable, Field, Empty), `src/api/{client,sse,queries}.ts` (`apiGet`, `apiPost`, `ApiError`, `useEventStream`, `useInvalidateOnEvents`, `queryKeys`), `src/app/{App,Header,routes,Page}.tsx`, `src/styles/lab.css`, and the design-rules test.
+- `web/src/canvas/*` from #27: `FlowCanvas`, `issueGraphToCanvas`, `CanvasNode`, and the `renderNode` prop.
+- Server APIs from #24 and #25 (`harness/server/schemas.py`, `routes/actions.py`).
+
+If something named here does not exist, use the closest existing thing and list it in the PR body.
+
+## 1. Files
+- `web/src/api/types.ts` (new): hand-written TS interfaces mirroring `harness/server/schemas.py`:
+  - `CampaignCounts`, `CampaignSummary`, `GraphNode`, `GraphEdge`, `CampaignGraph`, `Card`, `BoardColumns` (7 keys: ready, running, needs_you, review, blocked, done, failed), `Board`, `InboxCheck`, `InboxPr`, `InboxFinding`, `InboxItem`, `RequestAccepted {request_id}`, `GateDecision {gate_id, status}`, `AgentsEnabled`.
+  - Field names exactly as in the Python models.
+- `web/src/api/queries.ts` (extend, keep what exists):
+  - add `queryKeys.board(campaign?)` = `["board", campaign ?? null]`, `queryKeys.graph(id)` = `["campaigns", id, "graph"]`, `queryKeys.agents(repo)` = `["agents", repo]`;
+  - add hooks `useCampaigns()`, `useCampaignGraph(id)`, `useBoard(campaign?)`, `useInbox()`, `useEnabledAgents(repo)`.
+  - `useInvalidateOnEvents`: `issue.updated` also invalidates `["board"]`; `run.updated` and `inbox.changed` also invalidate `["board"]` (a prefix match). Update its test.
+- `web/src/screens/campaigns/{CampaignsPage.tsx, IssueNode.tsx, campaigns.css}`, `web/src/screens/board/{BoardPage.tsx, board.css}`, `web/src/screens/inbox/{InboxPage.tsx, InboxItemPanel.tsx, inbox.css}`, with tests next to each.
+- `web/src/app/routes.tsx`: replace the `/campaigns`, `/board` and `/inbox` placeholders.
+- `web/src/app/Header.tsx`: the inbox count (§5).
+- `web/src/test/fetchMock.ts` (new): a small helper. `mockApi(routes: Record<"METHOD /path", (body?) => {status, json}>)` installs `vi.stubGlobal("fetch", ...)`, records calls, and makes unmatched requests fail the test. **No MSW** (no new packages).
+- `web/src/test/fakeEventSource.ts`: reuse the #26 fake if one exists, otherwise move it here.
+- Server, the agents endpoint (§4): `harness/server/routes/config.py` (new), one line in `harness/server/routes/__init__.py`, `tests/server/test_config_route.py`, and the path added to `tests/server/test_openapi.py`'s snapshot.
+
+Do NOT touch: `src/ui/*` (compose, don't edit; if a primitive truly lacks a prop, say so in the PR body), `src/canvas/*` (use `renderNode`; don't edit #27's status mapping), `tokens.css`, other `harness/**` files, `.github/`, `docs/`, `.orchestrator/`, `.claude/`. Add no packages.
+
+## 2. Campaigns (`/campaigns`, `/campaigns/:owner/:repo`)
+- **Selector:** a list (not a native select) of `useCampaigns()` items. Each row shows `repo`, then the counts in mono, `READY 1 · RUNNING 1 · NEEDS YOU 1 · REVIEW 0 · BLOCKED 1 · DONE 1 · FAILED 0`, as `<dl>` or spans with mono numbers.
+  - `/campaigns` redirects to the first campaign when one exists. With none, it shows `<Empty>No campaigns registered. Run harness init.</Empty>`.
+- **Graph:** `useCampaignGraph("owner/repo")` → `GET /api/campaigns/{owner}/{repo}/graph`, encoding each segment with `encodeURIComponent`.
+  - Convert with `issueGraphToCanvas`, render `FlowCanvas mode="view"`, and pass `renderNode={(n) => <IssueNode .../>}`.
+  - `IssueNode` takes the ORIGINAL issue status from a `Map<string, GraphNode>` built alongside, not the #27-mapped NodeStatus. It renders the mono `#N`, the title (2-line clamp) and a `StatusTag`.
+  - The issue-status class is `issue--<status>`, from the issue's tone table (`campaigns.css`, token variables only):
+
+    | Status | Tone |
+    |---|---|
+    | ready | `2px solid var(--ink)` outline |
+    | running | `--accent` border |
+    | needs-you | `2px dashed var(--accent)` |
+    | review | `4px double var(--ink)` |
+    | blocked | `--faint` border and text |
+    | done | `--ink` background, `--on-inverse` text |
+    | failed | `--accent` background, `--on-accent` text |
+
+  - StatusTag tone mapping (export `ISSUE_TONE: Record<IssueStatus, Tone>`): running and needs-you → live, failed → fail, done → ok, review and ready → muted, blocked → warn.
+- **Selection:** clicking a node sets the selected id and opens a side `Panel` (a right column at ≥860px, below the canvas otherwise). The panel shows `#N` and the title, `agent` and `playbook` as mono `dl` rows, a `StatusTag`, a "Run" link to `/runs/${encodeURIComponent(run_id)}` when `run_id` is set, and an "Issue on GitHub" link to `url` (`target="_blank" rel="noreferrer"`). Esc or a Close button clears the selection.
+- **Legend:** a row with one `StatusTag` per issue status, in the order of the tone table.
+- **Live updates:** through the `useInvalidateOnEvents` that App already mounts. Don't mount it again.
+
+## 3. Board (`/board`, optional `?campaign=owner/repo`)
+- `useBoard(campaign)` → `GET /api/board` plus `?campaign=` when set. A campaign filter uses the same list of campaign links as the selector (an "All" link plus one per campaign).
+- Seven columns in this order, with mono uppercase headers and counts (`NEEDS YOU 2`): ready, running, needs_you, review, blocked, done, failed.
+- Each card is an `<article>` showing:
+  - a mono `#N` (and `repo` when no campaign filter is set);
+  - the title;
+  - an agent `StatusTag tone="muted"`;
+  - the mono playbook id;
+  - a PR link (`https://github.com/${repo}/pull/${pr}`) when `pr` is set;
+  - a run link when `run_id` is set;
+  - `blocked by #2, #3` in mono when the list is non-empty.
+- An empty column renders a mono `—` (U+2014), not blank.
+- Layout: a CSS grid, `repeat(7, minmax(180px, 1fr))` with horizontal scroll INSIDE the board container only at ≥860px (the page body must not scroll horizontally at 1024px), and one column below 860px. No drag and drop.
+
+## 4. Inbox (`/inbox`)
+- `useInbox()` → `GET /api/inbox`. Group by `kind`, groups ordered `plan_approval, merge_approval, gate, question, escalation`, then any others alphabetically. Group header is mono uppercase with a count.
+- Each item is an `InboxItemPanel` (`Panel`) showing:
+  - title `#N title`; `repo`, `agent` and `created_at` in mono; `summary` as pre-wrapped text;
+  - `pr`: a link plus a `DataTable` of checks (name, mono state; the state tone is fail for `fail|failure|error|timed_out`, ok for `pass|success`, otherwise muted);
+  - `findings`: a list with a mono severity tag plus the text.
+- **Actions:**
+  - **Approve** (primary): an optional note `Field` (collapsed behind a "Add note" text button) → `POST /api/inbox/${encodeURIComponent(id)}/approve` with body `{note}` (omit when empty).
+  - **Reject** (secondary): only when `gate_id` is set, because #25 returns 422 for non-gate items. It opens an inline textarea `Field` labelled "Reason"; Submit is disabled until the trimmed text is non-empty, and posts `{message}`.
+  - **Reroute**: a native `<select>` of `useEnabledAgents(item.repo)` names (excluding the current `agent`) plus a "Reroute" button → `POST .../reroute` with `{agent}`.
+- **While a request is in flight:** all three buttons of that item are disabled. A second click is a no-op, so a double click sends exactly one request.
+- **On 200/202:** remove the item optimistically (`queryClient.setQueryData`), then invalidate `["inbox"]` and `["board"]`.
+- **On `ApiError`:** restore the item and show `err.detail` in `--accent` text under the buttons, with `role="alert"`. 409 and 422 show their detail verbatim.
+- **Empty state:** `<Empty>Nothing waiting on you.</Empty>`.
+- **Server endpoint for the agents list:** `GET /api/agents/enabled?repo=owner/repo` → `{agents: [{name, enabled: true}]}`.
+  - Source: `repo_config_of(get_repo(store, repo)).agents`, filtered by `enabled`, sorted by name.
+  - An unknown repo (not in `config.repos`) → 404 `{"detail": "unknown repo"}`.
+  - Write it in `routes/config.py` (about 20 lines) and reuse `derive.repo_config_of`.
+  - Tests: an enabled and a disabled agent, an unknown repo, and 401 without the cookie.
+
+## 5. Header
+`INBOX <n>` in mono, beside the nav: a link to `/inbox` with `aria-label="Inbox, <n> items"`, where `n` = `useInbox().data?.length ?? 0`. It is hidden while loading, and it updates through query invalidation.
+
+## 6. Accessibility and design
+- Everything is reachable with Tab in DOM order, and the focus ring comes from `lab.css`.
+- Buttons are `min-height: 44px`.
+- Links get the accent on hover.
+- All numbers and ids are mono.
+- No hex values, a radius of 0, no shadows, gradients, emojis or icons. The design-rules test must pass unchanged.
+- No horizontal page scroll at 1024px. Test it by asserting the board container has `overflow-x: auto` and the page uses no fixed widths over 1024px.
+
+## 7. Tests (Vitest + Testing Library + `fetchMock`; no network)
+Fixtures are TS objects that mirror the server seed (`tests/fixtures/server_seed.py`: issues #2–#7 with statuses done, ready, blocked, running, needs-you, ready; edges 2→3, 3→4; 2 inbox items, a plan_approval for run A with `gate_id` and a question for run B with pr 42, the checks including a failed ci entry, and 2 findings). Stub `ResizeObserver` and `DOMMatrixReadOnly` as #27 does.
+1. **Campaigns:** renders 6 issue nodes and the legend with 7 tags. Clicking `#5` opens the panel with agent, playbook and a run link encoded with `%2F`/`%23`. Esc closes it. With no campaigns, the empty text shows.
+2. **Board:** each fixture card is in the right column, every empty column shows `—`, and the headers carry counts. `?campaign=` is passed to fetch.
+3. **Inbox:**
+   - Approve posts to the encoded approve URL and the item disappears.
+   - A double click sends one request.
+   - Reject is disabled until the text is non-empty, then posts `{message}`, and is absent for the question item.
+   - Reroute posts `{agent}`; a mocked 422 `{detail: "unknown or disabled agent"}` shows that text with `role="alert"` and restores the item.
+   - A 409 `{detail: "already resolved"}` shows its detail.
+4. **SSE:** a fake EventSource `inbox.changed` event triggers a refetch of `/api/inbox` (assert a second fetch call).
+5. **Header:** shows `INBOX 2`, then `INBOX 1` after an approve.
+6. **Keyboard:** tabbing reaches Approve, Add note, Reject and Reroute in order on the first item.
+7. **queries:** the new invalidation keys.
+8. **Server:** `tests/server/test_config_route.py` (pytest).
+
+`npm run lint`, `npm run typecheck`, `npm test`, `npm run build`, `uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest -q` must all pass. Paste the raw tails in the PR body.
+
+## 8. Do not add
+- The Run view (#29) or the playbook editor (#31).
+- Drag and drop, issue editing, or handoff actions.
+- MSW, a state library, a UI kit or icons.
+- Server changes beyond the agents endpoint.
