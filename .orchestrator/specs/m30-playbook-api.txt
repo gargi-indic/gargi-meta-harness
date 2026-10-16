@@ -1,0 +1,166 @@
+Binding details for #30 (M2.8 playbook API). Where these differ from the issue, these win. Read the real signatures on main first, and reuse merged code instead of re-implementing it. If something named here does not exist, use the closest existing API and list it in the PR body.
+
+Merged code to reuse:
+- **Playbooks:**
+  - `harness/playbook/load.py` (`load_playbook`, `PlaybookError`, `builtin_playbooks`; the built-ins are package data in `harness/playbooks/*.yaml`);
+  - `harness/playbook/validate.py` (`validate(pb, agent_caps=...) -> list[PlaybookIssue(path, code, message)]`; its codes include `unrouted_port`, `unreachable`, `unbounded_cycle`, `unknown_gate`, `bad_port`, `bad_target`, `unknown_node`, `unknown_branch`, `bad_edge_key`, `missing_message`, and the caps check for `action: plan`);
+  - `harness/playbook/schema.py` (`playbook_json_schema()`);
+  - `harness/playbook/models.py` (`Playbook`, every node's `ports()`).
+- **Engine:** `harness/engine/runner.py` (`Runner(store, outbox=None, executors, adapters, gh=None, clock=...)`, `start_run`, `tick`; `_mirror` already returns early when `outbox is None`), `harness/engine/executors/base.py` (`Done`, `Waiting`, `ExecutorRegistry`, `ExecContext`), `harness/adapters/base.py` (`AdapterRegistry`), `harness/adapters/fake.py` (`FakeAdapter`).
+- **Store:** `harness/store/db.py` (`Store(":memory:", clock=...)`, `migrate`), `harness/store/repo.py` (`upsert_repo`, `upsert_issue`, `IssueRow`, `steps_for_run`, `get_run`), `harness/store/etag_cache.py` (`SqliteEtagCache`).
+- **GitHub:** `harness/github/client.py` (`GitHub`, `GitHubError`, `get/post/put`, `repo`, `file_text(repo, path, ref)`, `create_pull`, `pulls_for_head`; GET requests are ETag-cached by the client itself). `harness/secrets.py` (`github_token`, `redact`).
+- **Server:** `harness/server/` (`create_app`, `deps`, `routes/`, the #24 conftest client, `tests/fixtures/server_seed.py`).
+
+## 1. Files
+- `harness/server/playbook_service.py` (new): listing, getting and validating playbooks, and saving them (§2, §3, §5).
+- `harness/server/dry_run.py` (new): §4.
+- `harness/engine/fakes.py` (new): `ScriptedExecutor` (§4).
+- `harness/server/routes/playbooks.py` (new). Its request and response models live here or in `playbook_service.py`, NOT in `schemas.py`.
+- `harness/server/routes/__init__.py`: add `playbooks.router` to the list. This is a one-line change; #25 adds its router on the same line in parallel, so expect a trivial rebase.
+- `harness/server/deps.py`: `get_github(request) -> GitHub | None` (`getattr(app.state, "gh", None)`), `get_builtin_dir(request) -> Path`, and `get_clock(request) -> Callable[[], datetime]`.
+- `harness/server/app.py`: `create_app(..., gh: GitHub | None = None, builtin_dir: Path | None = None, clock: Callable[[], datetime] | None = None)`. Store them on `app.state`. The default `builtin_dir` is `Path(str(importlib.resources.files("harness.playbooks")))` and the default clock is `datetime.now(UTC)`. Change nothing else in `app.py`.
+- `harness/cli.py` `serve` only:
+  - Try `github_token()`. On success, build `GitHub(token=..., cache=SqliteEtagCache(store))` and pass `gh=` into `create_app`. On failure, pass `gh=None` and print one warning line ("GitHub not configured: repo playbooks and save are disabled").
+  - Close the client after the server stops (`asyncio.run(gh.aclose())` or the existing pattern).
+  - Never print the token.
+- Tests: `tests/server/test_playbooks_list.py`, `test_playbooks_validate.py`, `test_playbooks_dry_run.py`, `test_playbooks_save.py`, `tests/engine/test_fakes.py`, and YAML fixtures under `tests/fixtures/playbooks/`.
+
+Do NOT touch: the validator, models, loader or schema in `harness/playbook/*` (gaps are follow-ups; list them in the PR body), the runner, executors, adapters, `harness/github/*`, `harness/store/*`, `schemas.py`, `derive.py`, `events.py`, `web/`, `.github/`, `pyproject.toml`/`uv.lock` (no new deps), `.orchestrator/`, `.claude/`, `docs/PLAN.md`.
+
+## 2. List, get, schema
+- `PLAYBOOK_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")` (fullmatch, max 64 chars). An id that fails it → 422 `{"detail": "invalid playbook id"}` on every route that takes an id.
+- Route registration order: `/api/playbooks/schema`, `/validate`, `/dry-run` and `/save` come before `/api/playbooks/{playbook_id}`.
+
+Endpoints:
+- `GET /api/playbooks?repo=` → `list[PlaybookSummary]`, where `PlaybookSummary = {id, source: "builtin"|"repo", path, sha: str|null, valid: bool}`.
+  - **Built-ins:** every `*.yaml`/`*.yml` in `builtin_dir`.
+    - `id` = the parsed `id`, or the file stem if parsing fails.
+    - `path = "playbooks/<file name>"`, `sha` = null.
+    - `valid` = it parses and `validate()` returns no issues.
+  - **Repo playbooks** (only with `repo=`):
+    - `repo` must be in `config.repos`, otherwise 404 `"unknown repo"`. `gh is None` → 503 `"GitHub not configured"`.
+    - `gh.get(f"repos/{repo}/contents/.harness/playbooks")`; a 404 means [].
+    - For each `type == "file"` entry ending `.yaml`/`.yml`: `gh.file_text(repo, entry["path"])`. `id` = file stem, `sha` = entry sha, `path` = entry path, `valid` as above.
+    - Any `GitHubError` → 502 `{"detail": "github: <status>"}`, never 500.
+  - **Order:** built-ins by id, then repo playbooks by id.
+- `GET /api/playbooks/{playbook_id}?repo=` → `{id, source, path, sha, yaml, parsed: dict|null}`.
+  - `parsed` = `Playbook.model_dump(mode="json")`, or null if the playbook does not parse.
+  - With `repo`, try the repo file `.harness/playbooks/<id>.yaml` first (then `.yml`), then the built-in. Without `repo`, use the built-in only.
+  - Unknown → 404 `"unknown playbook"`.
+- `GET /api/playbooks/schema` → `playbook_json_schema()` verbatim.
+
+## 3. Validate
+`validate_yaml(text: str, agent_caps: dict[str, set[str]] | None) -> ValidationResult{ok: bool, issues: list[Issue], playbook: Playbook | None}` in `playbook_service.py`.
+
+`Issue = {severity: "error"|"warning", code, message, node: str|null, port: str|null, path: str|null}`. Every issue today has severity "error"; the warning value is reserved.
+
+Steps, in order:
+1. **Size:** text longer than 256_000 chars → one issue `too_large`. Enforce it in the request model too (`max_length`), which gives 422.
+2. **Aliases:** reject anchors and aliases before loading (the alias-bomb guard, LESSONS 25). Scan with `yaml.scan(text)`. Any `AliasToken` or `AnchorToken` → one issue, code `yaml_aliases`, "anchors and aliases are not supported". A scanner error here is handled as step 3.
+3. **Syntax:** `yaml.safe_load`. A `yaml.YAMLError` → one issue, code `yaml_syntax`, message = the problem text, `path = "line <L>, column <C>"` (1-based, from `problem_mark`; null if absent).
+4. **Shape:** a result that is not a dict → one issue, code `not_mapping`.
+5. **Schema:** `Playbook.model_validate(data)`. A `ValidationError` → one issue per error, code `schema`:
+   - `path` = the dotted `loc`;
+   - `node` = `loc[1]` when `loc[0] == "nodes"` and `len(loc) > 1`;
+   - `message` = `err["msg"]`, which contains no Python type names (LESSONS 28).
+6. **Validator:** `validate(pb, agent_caps=agent_caps)` → one issue per `PlaybookIssue`, severity "error":
+   - `nodes.<id>[...]` → `node=<id>`;
+   - `edges.<n>.<p>` → `node=<n>` (null when `n == "*"`) and `port=<p>`.
+7. `ok` = no error-severity issues.
+
+`POST /api/playbooks/validate`, body `{yaml: str, agents?: {name: [cap, ...]}}` → always 200 with `{ok, issues}`. A body shape error is 422 (FastAPI). Nothing raises 500, ever: wrap in a final `except Exception` → issue `internal` and log it.
+
+## 4. Dry run (`dry_run.py` + `engine/fakes.py`)
+Design decision (binding): the dry run does not drive `FakeAdapter`. It replaces every executor with a `ScriptedExecutor`. That gives per-port control for every node kind; FakeAdapter states only cover agent ports. `FakeAdapter` is still registered in the `AdapterRegistry`, which satisfies the runner. State this decision in the PR body.
+
+- `class ScriptedExecutor` (in `harness/engine/fakes.py`):
+  - Constructor: `__init__(self, outcomes: Mapping[str, Sequence[str]], trace: list[TraceEntry], gates: list[dict])`.
+  - `advance(step, node, ctx)` returns `Done(outcome, {})`. For visit `v`, `outcome = outcomes[node_id][v-1]` if present, else the default `node.ports()[0]`, its primary port.
+  - Gate nodes that take the default append `{node, visit, gate: node.gate}` to `gates`.
+  - Every call appends `TraceEntry(node, visit, outcome)`.
+  - `def scripted_registry(playbook, outcomes, trace, gates) -> ExecutorRegistry` registers it for every node kind present except `join` and `parallel`, which stay with the Runner.
+- `async def dry_run(playbook: Playbook, *, outcomes: dict[str, list[str]], max_steps: int = 200) -> DryRunResult`:
+  - Uses a fresh `Store(":memory:", clock=<incrementing fake clock>)`, `migrate()`, `upsert_repo("dry-run/dry-run", ...)`, and one `IssueRow` #1.
+  - `Runner(store, None, scripted_registry(...), adapters_with_fake, gh=None, clock=<fake float clock>, playbooks={playbook.id: playbook})`, then `start_run`.
+  - Loop:
+    - `await runner.tick()`, then `await asyncio.sleep(0)`, so the timeout can fire.
+    - Stop with `escalated` as soon as a step of an `escalate` node exists. Append `TraceEntry(escalate_node, visit, None)` and do not advance it.
+    - Run status `done` → `done`.
+    - Run `failed`, or `tick()` returned 0 with the run not terminal → `error`. The `error` field gets the run's latest `no_route`/`executor_error`/`unknown_node`/`routing_loop` event kind, or `"stalled"`.
+    - `len(trace) >= max_steps` → `max_steps`.
+  - Result: `{terminated: "done"|"escalated"|"max_steps"|"error", trace: [{node, visit, outcome}], gates_auto_resolved: [...], error: str|null}`.
+- `POST /api/playbooks/dry-run`, body `{yaml, scenario?: {outcomes?: {node: [outcome, ...]}, max_steps?: int (1..1000, default 200)}}`:
+  - `validate_yaml` first; errors → 422 `{"detail": "invalid playbook", "issues": [...]}`.
+  - A scenario node not in the playbook, or an outcome not in that node's `ports()` → 422 `{"detail": "bad scenario: ..."}`.
+  - Run it as `await asyncio.wait_for(dry_run(...), timeout=10.0)`. A timeout → 200 `{terminated: "error", error: "timeout", trace: <so far>}`. The timeout seconds are injectable via a module constant that tests can monkeypatch.
+  - It never touches the app store, needs no network, and leaves no state behind.
+
+## 5. Save
+`POST /api/playbooks/save`, body `{repo, id, yaml, message?: str, base?: str}` → 200 `{pr: {number, url}, branch, existing: bool}`.
+
+Checks, in this order:
+1. A bad id → 422.
+2. The repo is not in `config.repos` → 404 `"unknown repo"`.
+3. `gh is None` → 503.
+4. `validate_yaml` errors → 422 `{"detail": "invalid playbook", "issues": [...]}`, with no GitHub call.
+5. The parsed `id` differs from the body `id` → 422, issue code `id_mismatch`.
+
+Flow (`save_playbook(gh, repo, id, yaml, message, base, now)` in the service; every GitHub call goes through the client):
+1. `base = body.base or (await gh.repo(repo))["default_branch"]`.
+2. **Idempotency:**
+   - `gh.get(f"repos/{repo}/pulls", state="open", per_page=100)`.
+   - For each PR whose `head.ref` starts with `harness/playbook-<id>-`, compare `gh.file_text(repo, ".harness/playbooks/<id>.yaml", ref=head.ref)` with `yaml`.
+   - If they are equal, return that PR with `existing: true`, and make no other write.
+3. Read the base sha: `gh.get(f"repos/{repo}/git/ref/heads/{base}")["object"]["sha"]`.
+4. `branch = f"harness/playbook-{id}-{now():%Y%m%d%H%M%S}"`. Create it with `gh.post(f"repos/{repo}/git/refs", ref=f"refs/heads/{branch}", sha=sha)`.
+5. Existing file sha on base: `gh.get(f"repos/{repo}/contents/.harness/playbooks/{id}.yaml", ref=base)`; a 404 means none.
+6. `gh.put(f"repos/{repo}/contents/.harness/playbooks/{id}.yaml", message=message or f"Playbook: {id}", content=base64(yaml utf-8), branch=branch, [sha=existing])`.
+7. `gh.create_pull(repo, title=f"Playbook: {id}", head=branch, base=base, body=...)`. The body is "Saved from the harness playbook editor." plus a "Validation" section listing the warnings, or "no issues".
+8. Return `{pr: {number, url: html_url}, branch, existing: false}`.
+
+Rules: it never writes to `base`; assert `branch != base`. A `GitHubError` → 502 `{"detail": "github: <status> <redacted message>"}`.
+
+## 6. Tests (pytest, no network)
+- respx with `pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True)`, not by setting fixture attributes (lesson 3).
+- `GitHub(token="t", sleep=<async no-op>, write_spacing=0.0)` (lesson 4).
+- The app comes from `create_app(..., gh=..., builtin_dir=..., clock=lambda: datetime(2026, 10, 16, 12, 0, 0, tzinfo=UTC))`.
+
+Cases:
+1. **validate:**
+   - The built-in `plan-build-review` → ok:true.
+   - Fixtures for an unwired port (`unrouted_port`), an unreachable node (`unreachable`), a cycle without max_visits (`unbounded_cycle`), an undefined gate (`unknown_gate`), and `action: plan` with `agents: {codex: ["implement"]}` (the caps code) each give the expected `code` and `node`. An edge issue gets `port`.
+   - A YAML syntax error → 200, ok:false, `path` "line L, column C".
+   - Each of `[1,2]`, `"str"`, `null` → `not_mapping` (no 500).
+   - Pydantic errors → `schema` issues with `node`.
+   - An alias bomb → `yaml_aliases`, fast.
+   - Over-size text → 422.
+2. **dry-run:**
+   - `plan-build-review` with the default scenario → `done`, and the trace starts `plan/1 plan_ready, plan_review/1 approve, ...` and ends at `merge merged`.
+   - `{plan_review: [changes, changes, changes, changes]}` → `escalated` via `exhausted`. Assert the trace contains the exhausted routing and ends with the escalate entry.
+   - A looping fixture playbook (two nodes cycling with `max_visits: 1000`) → `max_steps` at the cap.
+   - A bad scenario node or port → 422.
+   - A timeout (monkeypatch the constant to 0, or make it slow) → `error`/`timeout`.
+   - respx with no routes and `assert_all_mocked` → no network.
+   - The app store's row counts (runs, steps, events, outbox) are unchanged.
+3. **save:**
+   - respx asserts the exact call sequence: GET repo (default branch), GET pulls, GET ref, POST refs, GET contents (404), PUT contents (assert `branch`, base64 `content`, no write to base), POST pulls. It returns the PR.
+   - A second call with identical content (respx returns the open PR plus a matching `file_text`) gives the same PR, `existing: true`, and no POST refs or POST pulls.
+   - Invalid YAML → 422 with zero GitHub calls.
+   - A bad id (`../x`, `X`, `a/b`) → 422.
+   - An unknown repo → 404, and `gh=None` → 503.
+4. **list/get:**
+   - Built-ins are listed (`plan-build-review`, `source: builtin`, valid true).
+   - A repo listing goes through the contents API. A second request sends `If-None-Match` and gets a 304 (`etag` from the first response); the result is the same.
+   - A missing `.harness/playbooks` (404) → only the built-ins.
+   - `get` returns `yaml` and `parsed`, and an unknown id → 404.
+   - `schema` equals `playbook_json_schema()`.
+5. `ScriptedExecutor` unit tests: per-visit outcomes, the default primary port, and gate recording.
+6. `harness serve` with no token prints the warning and still starts. Monkeypatch `github_token` to raise and reuse #23's serve test pattern, or make the build function testable.
+
+`uv run ruff format --check .`, `uv run ruff check .` and `uv run pytest -q` must all pass. Paste the raw pytest tail in the PR body.
+
+## 7. Do not add
+- Merging saved PRs, or loading playbooks from branches.
+- New validator rules, parallel or join dry-run semantics, or UI.
+- A caching layer beyond the client's ETag cache.
+- New dependencies, or changes to the playbook models.

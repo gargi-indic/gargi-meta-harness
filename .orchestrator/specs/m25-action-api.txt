@@ -1,0 +1,134 @@
+Binding details for #25 (M2.3 action API). Where these differ from the issue, these win. Read the real signatures on main first, and reuse merged code instead of re-implementing it. If something named here does not exist, use the closest existing API and list it in the PR body.
+
+Merged code to reuse:
+- `harness/engine/runner.py` `Runner`: `pause(run_id)`, `resume(run_id, to=None)`, `retry_node(run_id, node_id)` (it already enforces `max_visits` and raises ValueError), `async cancel(run_id)` (it already calls adapter `cancel` for waiting agent steps and marks the run `cancelled`), plus `tick()`, `adapters`, `store`, `playbooks`. These are the same calls the CLI makes (`harness/cli.py` `pause`/`resume`/`cancel`/`retry`).
+- `harness/github/commands.py`: `decide(store, gate_id, status, note, decided_by)` (CLI and slash-command path; it writes the `gate_decided` event) and `default_retry_node`.
+- `harness/store/repo.py`: `get_run`, `steps_for_run`, `get_gate`, `update_run`, `append_event`, `get_repo`. `harness/server/derive.py`: `playbook_dict(run)` (context playbook, else built-in), `repo_config_of(get_repo(...))`, `needs_human(step)`. `harness/config.py`: `parse_repo_config`, `RepoConfig.agents` (`AgentConfig.enabled`). `harness/adapters/base.py`: `SessionRef`. `harness/secrets.py`: `redact`.
+- `harness/server/`: `deps.get_store/get_config`, `routes/` (#24), `events.KIND_TO_TYPES`, and `tests/fixtures/server_seed.py` (`seed_store`, `seed_config`).
+
+Facts on main:
+- An inbox item id is a step id. Step and run ids contain `/`, `#` and `@` (for example `acme/widgets#5@1`), so every id path parameter is `{x:path}`.
+- A gate step that is waiting has `output.gate_id`. After `decide`, the gate row is `approved` or `rejected` while the step stays `waiting` until the runner polls it again.
+- Escalate steps wait with `output.needs_you` and no `gate_id`.
+- The server process has no Runner and no outbox: gate decisions are store-only (exactly like `harness approve`), and every other action becomes a control request that the daemon's Runner applies.
+
+## 1. Files
+- `harness/store/db.py`: append ONE new migration entry to `MIGRATIONS`. Do not edit existing entries. It creates
+  `control_requests(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, step_id TEXT, kind TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, handled_at TEXT, result_json TEXT)`
+  plus an index on `(handled_at, id)`. Fix any test that asserts the schema version number.
+- `harness/engine/control.py` (new), §2.
+- `harness/engine/runner.py`: exactly one call site, the first statement of `tick()`: `await apply_pending(self, self.store)`. The import goes at module top. `control.py` must import `Runner` only under `TYPE_CHECKING` (no cycle). `tick()`'s return value is unchanged. Make no other runner change.
+- `harness/server/routes/actions.py` (new; request and response models live in this file, NOT in `schemas.py`).
+- `harness/server/routes/__init__.py`: add `actions.router` to the list. This is a one-line change; #30 adds its router on the same line in parallel, so expect a trivial rebase.
+- `harness/server/events.py`: extend `KIND_TO_TYPES` (§4) and the module docstring.
+- Tests: `tests/engine/test_control.py`, `tests/server/test_actions.py`, plus updates to `tests/server/test_event_mapping.py` and the schema-version test if needed.
+
+Do NOT touch: `harness/cli.py`, `harness/github/*`, `harness/server/app.py`, `deps.py`, `schemas.py`, `derive.py`, executors, adapters, `web/`, `.github/`, `pyproject.toml`/`uv.lock` (no new deps), `.orchestrator/`, `.claude/`, `docs/PLAN.md`.
+
+## 2. `harness/engine/control.py`
+- `CONTROL_KINDS = ("pause", "resume", "cancel", "retry_node", "send_message", "reroute")`.
+- `@dataclass(frozen=True) class ControlRequest`: `id: int, run_id: str, step_id: str | None, kind: str, payload: dict, created_at: str, handled_at: str | None, result: dict | None`. A `status` property returns `"pending"` if `handled_at` is None, otherwise `"done"` if `result.ok` is true, otherwise `"error"`. Corrupt JSON in a row reads as `{}` / None and never raises.
+- `enqueue(store, run_id, kind, payload, step_id=None) -> int`:
+  - ValueError on an unknown kind; KeyError on an unknown run.
+  - In one `store.tx()`: insert the row and `append_event(kind="control_requested", data={"request_id", "kind"}, repo, issue, run_id)`.
+- `get_request(store, request_id) -> ControlRequest | None`.
+- `async def apply_pending(runner, store) -> int`. For each row with `handled_at IS NULL`, ordered by id:
+  1. **Claim** it with `UPDATE control_requests SET handled_at=? WHERE id=? AND handled_at IS NULL`. Skip it if rowcount != 1. This makes it exactly-once, even across processes and repeated calls.
+  2. **Apply** it, catching `Exception` per row so one bad request never breaks `tick()`. Results:
+     - success: `{"ok": true}`, plus `{"node", "visit"}` where useful;
+     - failure: `{"ok": false, "error": redact(str)}`, with the KeyError message unwrapped as in commands `_error_text`.
+  3. **Record** it: write `result_json`, then `append_event(kind="control_applied", data={"request_id", "kind", "ok"})`.
+  4. Return the number of rows processed.
+- What each kind does:
+  - `pause` → `runner.pause(run_id)`.
+  - `resume` → `runner.resume(run_id, to=payload.get("to"))`.
+  - `cancel` → `await runner.cancel(run_id)`.
+  - `retry_node` → `runner.retry_node(run_id, payload["node"])`. A `max_visits` overflow becomes an error result.
+  - `send_message` → finds the target step:
+    - it is `step_id` if given;
+    - otherwise it is the run's latest step whose `ref` has `"agent"` and `"id"`, preferring `status == "waiting"`, then latest by (started_at, id).
+    - With no such step, the result is the error "no agent session to message".
+    - Then `await runner.adapters.get(ref["agent"]).send(SessionRef(...), payload["text"])`, built exactly as the runner's `cancel` builds a SessionRef.
+  - `reroute` → `payload["agent"]`:
+    - Error if the agent is not in `runner.adapters.names()`.
+    - Error "agent session already started" if ANY step of the run with status `running|waiting` has a `ref` containing `"id"`.
+    - Otherwise, in one tx: set `run.context["agent"] = agent` via `update_run(context=...)` (the Runner's `_resolve_agent` reads `context.agent` first, so the next agent step uses it), and write `append_event(kind="rerouted", data={"from", "to"})`.
+    - Do not change the `agent:` issue label in this task (follow-up; say so in the PR body).
+
+## 3. Routes (`APIRouter(prefix="/api")`, behind #23's TokenGuard; no slash-command allowlist)
+Shared error format: `{"detail": str}`.
+- Unknown run → 404 `"unknown run"`.
+- An unknown or no-longer-listed inbox item → 404 `"unknown inbox item"`.
+- A terminal run (`TERMINAL_STATUSES`) for run controls → 409 `"run is <status>"`.
+
+An inbox item is resolved like this:
+- The step must exist, its run must exist and be non-terminal, and `step.output.needs_you` must be truthy.
+- If `output.gate_id` names a gate whose status is not `pending` → 409 `"already resolved"`. This covers the window where the step is still `waiting`.
+- A step that exists but is no longer `waiting` → 409 `"already resolved"`.
+
+Endpoints:
+1. `POST /api/inbox/{item_id:path}/approve`, body `{note?: str, to?: str}`:
+   - **Gate item:** `decide(store, gate_id, "approved", note, "web")` → 200 `{"gate_id", "status": "approved"}`.
+   - **Non-gate item (escalate):**
+     - If `note` is set, first enqueue `send_message{text: note}` (step_id = none, latest agent session).
+     - Then enqueue `resume{to}`. Here `to` = body.to, or else the node of the run's latest other `done` step by (ended_at, id). With neither → 422 `"no node to resume at"`. A `to` that is not in the run's playbook → 422.
+     - Returns 202 `{"request_id": <resume id>, "request_ids": [...all]}`.
+2. `POST /api/inbox/{item_id:path}/reject`, body `{message: str}`:
+   - `message` is required, stripped and non-empty; otherwise 422.
+   - **Gate item:** `decide(..., "rejected", message, "web")` → 200 `{"gate_id", "status": "rejected"}`. The gate executor turns the note into `correction`, which is the next step's `prev.correction`.
+   - **Non-gate item** → 422 `"reject applies to gate items"`.
+3. `POST /api/inbox/{item_id:path}/reroute`, body `{agent: str}`:
+   - The agent must be a key of `repo_config_of(get_repo(store, run.repo)).agents` with `enabled: true`; otherwise 422 `"unknown or disabled agent"`.
+   - Enqueue `reroute{agent}` with `step_id` = item id → 202 `{"request_id"}`.
+4. `POST /api/runs/{run_id:path}/pause|resume|cancel` → 202 `{"request_id"}`. `resume` takes an optional body `{to?: str}`, validated against the run's playbook (422).
+5. `POST /api/runs/{run_id:path}/nodes/{node}/retry`:
+   - `node` must be in the run's playbook (reuse `derive.playbook_dict(run)`, the lookup #24 uses); otherwise 422 `"unknown node"`.
+   - → 202.
+6. `POST /api/runs/{run_id:path}/message`, body `{text: str}` (stripped, non-empty, max 20000 chars) → 202.
+7. `GET /api/control-requests/{request_id:int}` → 200 `{id, run_id, step_id, kind, status, result, created_at, handled_at}`, or 404 `"unknown control request"`.
+
+Route registration order matters because `{run_id:path}` is greedy: declare the suffix routes in this router and check that they don't shadow #24's `GET /api/runs/{run_id:path}` and `/activity`. Add a test for each.
+
+All request models use `extra="forbid"`, and every field has a `Field(description=...)`. Bad JSON or a bad shape gives 422, never 500.
+
+## 4. Events (through the event log, never directly on the bus)
+Add to `KIND_TO_TYPES`:
+
+| Kind | SSE types |
+|---|---|
+| `gate_decided` | `(inbox.changed, step.updated)` |
+| `control_requested` | `(run.updated,)` |
+| `control_applied` | `(run.updated, inbox.changed)` |
+| `rerouted` | `(run.updated, issue.updated)` |
+
+## 5. Tests (pytest, no network)
+Use the `create_app(store=..., config=seed_config(), token="t", tail_events=False)` client from #24's `tests/server/conftest.py` and `seed_store`. Runner tests use `FakeAdapter` and the existing engine test helpers (`tests/engine/helpers.py`, `conftest.py`).
+1. **Approve parity:**
+   - On two identical seeded stores, run CLI-style `decide(store, gid, "approved", "lgtm", "cli")` on one and `POST approve {note: "lgtm"}` on the other.
+   - The gate rows (ignoring `decided_by` and `decided_at`) and the `gate_decided` event data (ignoring `decided_by`) are equal.
+   - The outbox row counts are equal (0 new on both).
+2. **Reject:** an empty or whitespace message gives 422 with no row change. A real message gives 200; then advancing the gate step with the GateExecutor yields `rejected` with `correction == message`.
+3. **Double approve:** the second call gives 409 `"already resolved"`, with exactly one `gate_decided` event and an unchanged gate row.
+4. **apply_pending per kind** against a FakeAdapter run started through `Runner.start_run`:
+   - pause stops `tick()` from advancing;
+   - resume continues;
+   - cancel calls the adapter `cancel` exactly once and the run is `cancelled`;
+   - retry_node gives a new visit, and an error result once `max_visits` is reached;
+   - send_message calls `send` exactly once with the text;
+   - reroute succeeds before any session starts (`context.agent` changes, `rerouted` event);
+   - reroute gives the error result after a session has started.
+5. **Exactly once:** two `apply_pending` calls (and two `tick()`s) process each request once, with `handled_at` set and one `control_applied` event.
+6. **Runner call site:** a test in the existing runner test style shows that `tick()` applies a queued `pause` before advancing anything.
+7. **Reroute:** an unknown agent → 422, a disabled agent (config `agents: {codex: {enabled: false}}`) → 422, and an enabled agent → 202 with a row.
+8. **Run controls:** each endpoint returns 202 with a row of the right kind and payload. An unknown run → 404, a terminal run → 409, a bad node → 422, an empty text → 422. Ids with `/`, `#` and `@` work URL-encoded.
+9. **Control request:** the GET is pending, then done or error after `apply_pending`; an unknown id → 404.
+10. **Event mapping:** the four new kinds publish the documented types.
+11. **No cookie:** POST → 401.
+
+`uv run ruff format --check .`, `uv run ruff check .` and `uv run pytest -q` must all pass. Paste the raw pytest tail in the PR body.
+
+## 6. Do not add
+- A budget kill switch, slash-command changes or UI.
+- A Runner in the server process, or direct bus publishing.
+- Label edits for reroute.
+- Parallel or branch features, or new dependencies.
