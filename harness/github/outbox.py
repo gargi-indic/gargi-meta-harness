@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -26,6 +27,7 @@ OpType = Literal[
     "delete_branch",
     "close_issue",
     "create_pull",
+    "tick_boxes",
 ]
 
 
@@ -81,6 +83,18 @@ class CreatePullPayload(OutboxPayload):
     body: str
 
 
+class TickBoxesPayload(OutboxPayload):
+    issue: int
+
+
+_UNCHECKED_BOX = re.compile(r"(?m)^(\s*[-*+] )\[ \]")
+
+
+def tick_boxes(body: str) -> str:
+    """Tick every unchecked task box at the start of a line; the rest of the body is left byte-for-byte."""
+    return _UNCHECKED_BOX.sub(r"\1[x]", body)
+
+
 _PAYLOAD_MODELS: dict[OpType, type[BaseModel]] = {
     "add_comment": AddCommentPayload,
     "edit_comment": EditCommentPayload,
@@ -91,6 +105,7 @@ _PAYLOAD_MODELS: dict[OpType, type[BaseModel]] = {
     "delete_branch": DeleteBranchPayload,
     "close_issue": CloseIssuePayload,
     "create_pull": CreatePullPayload,
+    "tick_boxes": TickBoxesPayload,
 }
 
 
@@ -300,6 +315,13 @@ class Outbox:
             await self.gh.create_pull(
                 repo, payload["title"], payload["head"], payload["base"], body=payload["body"]
             )
+        elif op == "tick_boxes":
+            issue = payload["issue"]
+            issue_data = await self.gh.issue(repo, issue)
+            current_body = issue_data.get("body") or ""
+            new_body = tick_boxes(current_body)
+            if new_body != current_body:
+                await self.gh.update_issue(repo, issue, body=new_body)
 
     async def run(self, stop: asyncio.Event, idle_sleep: float = 2.0) -> None:
         while not stop.is_set():
