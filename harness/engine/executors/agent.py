@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from harness.adapters.base import AgentState, SessionRef, StartRequest
+from harness.adapters.base import AgentSnapshot, AgentState, SessionRef, StartRequest
 from harness.engine.brief import build_brief
 from harness.engine.executors.base import Done, ExecContext, Executor, Waiting
 from harness.github.client import GitHubError
@@ -11,6 +11,8 @@ from harness.playbook.models import AgentNode, Node
 from harness.playbook.templating import render
 from harness.secrets import redact
 from harness.store.repo import IssueRow, append_event, get_issue, update_step
+
+_PAST_PLANNING = (AgentState.WORKING, AgentState.PR_READY, AgentState.NEEDS_INPUT, AgentState.FAILED)
 
 
 def duration_seconds(timeout: str) -> float:
@@ -32,7 +34,6 @@ class AgentExecutor(Executor):
 
         ref = dict(step.ref) if step.ref else {}
 
-        # Resume session or find
         session: SessionRef | None = None
         if "id" in ref:
             session = SessionRef(**{k: ref[k] for k in ("agent", "id", "url", "data") if k in ref})
@@ -43,19 +44,20 @@ class AgentExecutor(Executor):
             dump = s.model_dump(mode="json")
             return {**dump, **{k: v for k, v in ref.items() if k not in dump}}
 
-        # Setup since for timeout tracking
         if "since" not in ref:
             ref["since"] = ctx.clock()
             if step.ref != ref:
                 update_step(ctx.store, step.id, ref=ref)
 
-        # Timeout check
+        if session is not None and "id" not in ref:
+            ref = make_ref(session)
+            update_step(ctx.store, step.id, ref=ref)
+
         if node.timeout and (ctx.clock() - ref["since"]) > duration_seconds(node.timeout):
             return Done(
                 "timeout", {"error": f"timed out after {node.timeout}", "correction": "Agent timed out."}
             )
 
-        # Helper to construct StartRequest
         async def start_session(mode: str) -> SessionRef:
             base_branch = "main"
             if ctx.repo_config.base_branch:
@@ -117,41 +119,53 @@ class AgentExecutor(Executor):
             )
             return await adapter.start(req)
 
-        # Handling different actions
-        snap = None
+        async def poll(current: SessionRef) -> AgentSnapshot:
+            snapshot = await adapter.poll(current)
+            if snapshot.activity:
+                with ctx.store.tx():
+                    for item in snapshot.activity:
+                        append_event(
+                            ctx.store,
+                            kind="agent_activity",
+                            data={
+                                "step": step.id,
+                                "ts": item.ts,
+                                "kind": item.kind,
+                                "text": redact(item.text)[:2000],
+                            },
+                            repo=ctx.run.repo,
+                            issue=ctx.run.issue,
+                            run_id=ctx.run.id,
+                        )
+            return snapshot
+
         if node.action == "plan":
             if not session:
                 mode = "plan_first" if adapter.caps.plan_approval else "direct"
                 session = await start_session(mode)
                 ref = make_ref(session)
                 update_step(ctx.store, step.id, ref=ref)
-
-            snap = await adapter.poll(session)
+            snap = await poll(session)
 
         elif node.action == "implement":
             if not session:
                 session = await start_session("direct")
                 ref = make_ref(session)
+                ref["approved"] = True
                 update_step(ctx.store, step.id, ref=ref)
-
-            if not ref.get("approved"):
-                snap = await adapter.poll(session)
+                snap = await poll(session)
+            elif ref.get("approved"):
+                snap = await poll(session)
+            else:
+                snap = await poll(session)
                 if snap.state == AgentState.PLAN_READY:
                     ref["approved"] = True
                     update_step(ctx.store, step.id, ref=ref)
                     await adapter.approve_plan(session, None)
                     return Waiting(ref=ref, poll_after=0)
-                elif snap.state in (
-                    AgentState.WORKING,
-                    AgentState.PR_READY,
-                    AgentState.NEEDS_INPUT,
-                    AgentState.FAILED,
-                ):
+                if snap.state in _PAST_PLANNING:
                     ref["approved"] = True
                     update_step(ctx.store, step.id, ref=ref)
-
-            if not snap:
-                snap = await adapter.poll(session)
 
         elif node.action == "revise":
             if not session:
@@ -161,61 +175,15 @@ class AgentExecutor(Executor):
             if not msg.strip():
                 return Done("failed", {"error": "empty revise message"})
 
+            snap = await poll(session)
             if not ref.get("sent"):
-                snap = await adapter.poll(session)
                 ref["baseline_plan"] = snap.plan
                 ref["baseline_sha"] = snap.pr.head_sha if snap.pr else None
                 ref["sent"] = True
                 update_step(ctx.store, step.id, ref=ref)
-
                 await adapter.send(session, msg)
-                # Ensure activity is captured by falling through
-                # Actually wait, we should fall through, so we just set snap and process activity.
-                # Oh wait, the `Waiting` was returned immediately.
-                # Let's poll again or just process the first snap?
-                # The spec says "wait for PR_READY/PLAN_READY".
-                # If we fall through, we might immediately return Done if the state is still PR_READY but sha hasn't changed...
-                # Oh right, `Waiting` must be returned.
-                # Process activity first!
-                if snap.activity:
-                    for item in snap.activity:
-                        append_event(
-                            ctx.store,
-                            ctx.run.repo,
-                            ctx.run.issue,
-                            kind="agent_activity",
-                            data={
-                                "step": step.id,
-                                "ts": item.ts,
-                                "kind": item.kind,
-                                "text": redact(item.text)[:2000],
-                            },
-                        )
                 return Waiting(ref=ref, poll_after=0)
 
-            snap = await adapter.poll(session)
-
-        else:
-            raise ValueError(f"unknown agent action: {node.action}")
-
-        # Process activity
-        if snap.activity:
-            for item in snap.activity:
-                append_event(
-                    ctx.store,
-                    ctx.run.repo,
-                    ctx.run.issue,
-                    kind="agent_activity",
-                    data={
-                        "step": step.id,
-                        "ts": item.ts,
-                        "kind": item.kind,
-                        "text": redact(item.text)[:2000],
-                    },
-                )
-
-        # Return logic for revise
-        if node.action == "revise":
             if node.expect == "plan":
                 if snap.state == AgentState.PLAN_READY and snap.plan != ref.get("baseline_plan"):
                     return Done("plan_ready", {"plan": snap.plan, "session": session.id})
@@ -227,21 +195,21 @@ class AgentExecutor(Executor):
                 ):
                     return Done("pr_ready", {"pr": snap.pr.model_dump()})
 
-        # Map terminal states
+        else:
+            raise ValueError(f"unknown agent action: {node.action}")
+
         if snap.state == AgentState.NEEDS_INPUT:
             return Done("needs_input", {"question": snap.question, "session": session.id})
-        elif snap.state == AgentState.FAILED:
+        if snap.state == AgentState.FAILED:
             return Done("failed", {"error": redact(snap.error or "agent failed")})
 
         if node.action == "plan":
             if snap.state == AgentState.PLAN_READY:
                 return Done("plan_ready", {"plan": snap.plan, "session": session.id})
-            elif snap.state == AgentState.PR_READY and snap.pr:
+            if snap.state == AgentState.PR_READY and snap.pr:
                 return Done("pr_ready", {"pr": snap.pr.model_dump()})
-
-        if node.action == "implement":
+        elif node.action == "implement":
             if snap.state == AgentState.PR_READY and snap.pr:
                 return Done("pr_ready", {"pr": snap.pr.model_dump()})
 
-        # Wait
         return Waiting(ref=ref, poll_after=snap.poll_after)

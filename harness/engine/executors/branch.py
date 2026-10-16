@@ -1,3 +1,5 @@
+"""Executor for the branch node."""
+
 from harness.engine.executors.base import Done, ExecContext, Executor, Waiting
 from harness.playbook.models import BranchNode, Node
 from harness.playbook.templating import evaluate

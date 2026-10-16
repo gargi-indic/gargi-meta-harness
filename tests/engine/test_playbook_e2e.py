@@ -99,7 +99,6 @@ async def test_e2e_happy_path(store):
     steps = store.query("SELECT node_id, status, outcome FROM steps")
     assert run["status"] == "done", f"Steps: {steps}"
 
-    # check adapter calls
     starts = [c for c in adapter.calls if c[0] == "start"]
     assert len(starts) == 1
     approves = [c for c in adapter.calls if c[0] == "approve_plan"]
@@ -191,8 +190,6 @@ async def test_e2e_pr_review_changes(store):
         script_merge=[("merged", {})],
         adapter=adapter,
     )
-    # The fix round uses revise_pr essentially, we will use script_review to reject pr once
-    # Then approve
     runner.executors._executors["review"].script = [
         ("approve", {}),  # plan review
         ("changes", {"correction": "pr fix this"}),  # pr review 1
