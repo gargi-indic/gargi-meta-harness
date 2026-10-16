@@ -3,11 +3,15 @@
 SSE event types (the ``event:`` field on the wire). Every payload is
 ``{id, ts, repo, issue, run_id, kind, data}``: the event-log row, redacted.
 
-- ``run.updated``: a run started or changed status (pause, resume, retry, done, failed, cancelled, needs-you).
-- ``step.updated``: a step changed (waiting, done) or the engine hit a step-level problem.
+- ``run.updated``: a run started or changed status (pause, resume, retry, done, failed, cancelled, needs-you),
+  or a control request for it was queued or applied (``control_requested``, ``control_applied``).
+- ``step.updated``: a step changed (waiting, done), a gate was decided (``gate_decided``) or the engine hit a
+  step-level problem.
 - ``activity``: the agent reported an activity item; fetch it from ``/api/runs/{id}/activity``.
-- ``inbox.changed``: the set of items that need the human may have changed; refetch ``/api/inbox``.
-- ``issue.updated``: an issue's derived status or run may have changed; refetch board or graph.
+- ``inbox.changed``: the set of items that need the human may have changed (also after a gate decision or an
+  applied control request); refetch ``/api/inbox``.
+- ``issue.updated``: an issue's derived status or run may have changed (also after a reroute); refetch board
+  or graph.
 - ``log``: any other event-log row (daemon, sync and engine diagnostics).
 
 One event-log row publishes one bus event per mapped type, in the order of ``KIND_TO_TYPES``.
@@ -63,6 +67,10 @@ KIND_TO_TYPES: dict[str, tuple[str, ...]] = {
     "routing_loop": (EVT_STEP_UPDATED,),
     "needs_you": (EVT_INBOX_CHANGED, EVT_STEP_UPDATED),
     "agent_activity": (EVT_ACTIVITY,),
+    "gate_decided": (EVT_INBOX_CHANGED, EVT_STEP_UPDATED),
+    "control_requested": (EVT_RUN_UPDATED,),
+    "control_applied": (EVT_RUN_UPDATED, EVT_INBOX_CHANGED),
+    "rerouted": (EVT_RUN_UPDATED, EVT_ISSUE_UPDATED),
 }
 
 
