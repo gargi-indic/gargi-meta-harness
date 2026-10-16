@@ -399,6 +399,36 @@ def decide_gate(
         )
 
 
+def get_gate(store: Store, gate_id: str) -> GateRow | None:
+    rows = store.query("SELECT * FROM gates WHERE id = ?", (gate_id,))
+    if not rows:
+        return None
+    r = rows[0]
+    return GateRow(
+        id=r["id"],
+        run_id=r["run_id"],
+        step_id=r["step_id"],
+        name=r["name"],
+        status=r["status"],
+        note=r["note"],
+        decided_by=r["decided_by"],
+        created_at=r["created_at"],
+        decided_at=r["decided_at"],
+    )
+
+
+def get_meta(store: Store, key: str) -> str | None:
+    rows = store.query("SELECT value FROM meta WHERE key = ?", (key,))
+    return rows[0]["value"] if rows else None
+
+
+def set_meta(store: Store, key: str, value: str) -> None:
+    store.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
 def pending_gates(store: Store) -> list[GateRow]:
     rows = store.query("SELECT * FROM gates WHERE status = 'pending' ORDER BY created_at")
     return [
