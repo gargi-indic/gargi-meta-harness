@@ -2,8 +2,10 @@
 
 The server inserts a row with :func:`enqueue`; the Runner calls :func:`apply_pending` as the first thing in every
 ``tick()``. A row is claimed with a single ``UPDATE ... WHERE handled_at IS NULL``, so each request is applied
-exactly once even across processes and repeated calls. A failing request never breaks the tick: its error is
-recorded in ``result_json`` (``{"ok": false, "error": ...}``) and in the ``control_applied`` event.
+at most once, even across processes and repeated calls. A request is never retried: if the process dies after
+the claim and before the result is recorded, the row stays handled with no result and reads as
+``{"ok": false, "error": "interrupted"}``. A failing request never breaks the tick: its error is recorded in
+``result_json`` (``{"ok": false, "error": ...}``) and in the ``control_applied`` event.
 """
 
 import json
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from harness.adapters.base import SessionRef
+from harness.config import RepoConfig
 from harness.engine.model import TERMINAL_STATUSES
 from harness.secrets import redact
 from harness.store.db import Store
@@ -53,6 +56,9 @@ def _loads(text: Any) -> Any:
 def _request_from_row(row: Mapping[str, Any]) -> ControlRequest:
     payload = _loads(row["payload_json"])
     result = _loads(row["result_json"])
+    result = result if isinstance(result, dict) else None
+    if result is None and row["handled_at"] is not None:
+        result = {"ok": False, "error": "interrupted"}
     return ControlRequest(
         id=row["id"],
         run_id=row["run_id"],
@@ -61,7 +67,7 @@ def _request_from_row(row: Mapping[str, Any]) -> ControlRequest:
         payload=payload if isinstance(payload, dict) else {},
         created_at=row["created_at"],
         handled_at=row["handled_at"],
-        result=result if isinstance(result, dict) else None,
+        result=result,
     )
 
 
@@ -137,6 +143,18 @@ async def _send_message(runner: "Runner", req: ControlRequest) -> dict[str, Any]
     return {"ok": True, "step": target.id}
 
 
+def _current_agent(runner: "Runner", run: RunRow) -> str:
+    """The agent the next agent step would use: context, then the issue's ``agent:`` label, then the default."""
+    agent = run.context.get("agent")
+    if isinstance(agent, str) and agent:
+        return agent
+    issue = get_issue(runner.store, run.repo, run.issue)
+    for label in issue.labels if issue else []:
+        if label.startswith("agent:") and len(label) > len("agent:"):
+            return label[len("agent:") :]
+    return (runner.repo_configs.get(run.repo) or RepoConfig()).default_agent
+
+
 def _reroute(runner: "Runner", req: ControlRequest) -> dict[str, Any]:
     agent = _text(req.payload, "agent")
     if agent not in runner.adapters.names():
@@ -154,8 +172,7 @@ def _reroute(runner: "Runner", req: ControlRequest) -> dict[str, Any]:
         )
         if started:
             raise ValueError("agent session already started")
-        issue = get_issue(store, run.repo, run.issue)
-        previous = runner._resolve_agent(run, issue, runner._repo_config(run.repo))
+        previous = _current_agent(runner, run)
         update_run(store, run.id, context={**run.context, "agent": agent})
         append_event(
             store,
@@ -176,6 +193,11 @@ def _visit(run: RunRow | None, node: str) -> int | None:
 
 async def _apply(runner: "Runner", req: ControlRequest) -> dict[str, Any]:
     run_id = req.run_id
+    if req.kind in ("resume", "reroute") and req.step_id is not None:
+        # A second request for an inbox item must not repeat the first one's effect.
+        step = next((s for s in steps_for_run(runner.store, run_id) if s.id == req.step_id), None)
+        if step is None or step.status != "waiting":
+            raise ValueError("already resolved")
     if req.kind == "pause":
         runner.pause(run_id)
     elif req.kind == "resume":
@@ -197,7 +219,7 @@ async def _apply(runner: "Runner", req: ControlRequest) -> dict[str, Any]:
 
 
 async def apply_pending(runner: "Runner", store: Store) -> int:
-    """Apply every unhandled request in id order, each exactly once; returns how many were processed."""
+    """Apply every unhandled request in id order, each at most once; returns how many were processed."""
     processed = 0
     for row in store.query("SELECT id FROM control_requests WHERE handled_at IS NULL ORDER BY id"):
         cursor = store.execute(
@@ -211,18 +233,29 @@ async def apply_pending(runner: "Runner", store: Store) -> int:
             result = await _apply(runner, req)
         except Exception as exc:
             result = {"ok": False, "error": _error_text(exc)}
-        run = get_run(store, req.run_id)
-        with store.tx():
-            store.execute(
-                "UPDATE control_requests SET result_json = ? WHERE id = ?", (json.dumps(result), req.id)
-            )
-            append_event(
-                store,
-                kind="control_applied",
-                data={"request_id": req.id, "kind": req.kind, "ok": result["ok"]},
-                repo=run.repo if run else None,
-                issue=run.issue if run else None,
-                run_id=req.run_id,
-            )
+        try:
+            run = get_run(store, req.run_id)
+            with store.tx():
+                store.execute(
+                    "UPDATE control_requests SET result_json = ? WHERE id = ?", (json.dumps(result), req.id)
+                )
+                append_event(
+                    store,
+                    kind="control_applied",
+                    data={"request_id": req.id, "kind": req.kind, "ok": result["ok"]},
+                    repo=run.repo if run else None,
+                    issue=run.issue if run else None,
+                    run_id=req.run_id,
+                )
+        except Exception as exc:
+            try:
+                append_event(
+                    store,
+                    kind="tick_error",
+                    data={"error": redact(f"control request {req.id}: {type(exc).__name__}: {exc}")},
+                )
+            except Exception:
+                pass
+            continue
         processed += 1
     return processed

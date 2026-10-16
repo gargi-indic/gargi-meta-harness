@@ -218,6 +218,46 @@ async def test_approve_an_escalation_validates_the_node(client, store, seed) -> 
     assert control_rows(store) == []
 
 
+async def test_double_approve_of_an_escalation_is_409_and_queues_one_row(client, store, seed) -> None:
+    url = f"/api/inbox/{item_path(seed.escalate_step)}/approve"
+    assert (await client.post(url)).status_code == 202
+    second = await client.post(url, json={"note": "again"})
+    assert (second.status_code, second.json()) == (409, {"detail": "already resolved"})
+    assert len(control_rows(store)) == 1
+
+
+async def test_a_queued_resume_blocks_a_reroute_of_the_same_item(client, store, seed) -> None:
+    set_agents(store)
+    await client.post(f"/api/inbox/{item_path(seed.escalate_step)}/approve")
+    response = await client.post(
+        f"/api/inbox/{item_path(seed.escalate_step)}/reroute", json={"agent": "claude"}
+    )
+    assert (response.status_code, response.json()) == (409, {"detail": "already resolved"})
+    assert [r["kind"] for r in control_rows(store)] == ["resume"]
+
+
+async def test_approving_an_escalation_end_to_end_resolves_it_and_adds_one_step(client, store, seed) -> None:
+    run = get_run(store, seed.run_b)
+    update_run(
+        store, seed.run_b, context={**run.context, "visits": {"fix": 1}}
+    )  # the seed leaves visits empty
+    before = {s.id for s in steps_for_run(store, seed.run_b)}
+    url = f"/api/inbox/{item_path(seed.escalate_step)}/approve"
+    request_id = (await client.post(url)).json()["request_id"]
+    runner = Runner(store, None, ExecutorRegistry(), AdapterRegistry())
+    assert await apply_pending(runner, store) == 1
+    result = (await client.get(f"/api/control-requests/{request_id}")).json()
+    assert (result["status"], result["result"]) == ("done", {"ok": True})
+    steps = steps_for_run(store, seed.run_b)
+    escalate = next(s for s in steps if s.id == seed.escalate_step)
+    assert (escalate.status, escalate.outcome) == ("done", "resolved")
+    (new,) = [s for s in steps if s.id not in before]
+    assert (new.node_id, new.visit, new.status) == ("fix", 2, "pending")
+    assert get_run(store, seed.run_b).status == "running"
+    assert (await client.post(url)).status_code == 409
+    assert await apply_pending(runner, store) == 0
+
+
 # --- item resolution -------------------------------------------------------------------------------------
 
 
@@ -295,9 +335,9 @@ async def test_reroute_defaults_to_the_default_config_when_the_repo_is_not_synce
     client, store, seed
 ) -> None:
     store.execute("DELETE FROM repos")
-    ok = await client.post(f"/api/inbox/{item_path(seed.escalate_step)}/reroute", json={"agent": "jules"})
     bad = await client.post(f"/api/inbox/{item_path(seed.escalate_step)}/reroute", json={"agent": "claude"})
-    assert (ok.status_code, bad.status_code) == (202, 422)
+    ok = await client.post(f"/api/inbox/{item_path(seed.escalate_step)}/reroute", json={"agent": "jules"})
+    assert (bad.status_code, ok.status_code) == (422, 202)
 
 
 # --- run controls -----------------------------------------------------------------------------------------
@@ -385,6 +425,19 @@ async def test_the_context_playbook_decides_which_nodes_exist(client, store, see
     playbook["nodes"]["custom"] = playbook["nodes"]["fix"]
     update_run(store, seed.run_b, context={**run.context, "playbook": playbook})
     assert (await client.post(f"/api/runs/{run_path(seed.run_b)}/nodes/custom/retry")).status_code == 202
+
+
+async def test_overlong_names_are_422(client, store, seed) -> None:
+    long = "x" * 201
+    run = run_path(seed.run_b)
+    assert (await client.post(f"/api/runs/{run}/resume", json={"to": long})).status_code == 422
+    assert (
+        await client.post(f"/api/inbox/{item_path(seed.escalate_step)}/approve", json={"to": long})
+    ).status_code == 422
+    assert (
+        await client.post(f"/api/inbox/{item_path(seed.escalate_step)}/reroute", json={"agent": long})
+    ).status_code == 422
+    assert control_rows(store) == []
 
 
 @pytest.mark.parametrize("body", [{"text": ""}, {"text": "  \n "}, {}, {"text": "x" * 20001}, {"text": 1}])

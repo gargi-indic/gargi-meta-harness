@@ -5,8 +5,15 @@ import json
 import pytest
 
 from harness.adapters.fake import FakeAdapter
-from harness.engine import Done
-from harness.engine.control import CONTROL_KINDS, ControlRequest, apply_pending, enqueue, get_request
+from harness.engine import Done, Waiting
+from harness.engine.control import (
+    CONTROL_KINDS,
+    ControlRequest,
+    _request_from_row,
+    apply_pending,
+    enqueue,
+    get_request,
+)
 from harness.store.repo import get_run
 from tests.engine.helpers import (
     CHECK,
@@ -90,7 +97,7 @@ async def test_corrupt_json_reads_as_empty_and_never_raises(env):
     )
     req = get_request(env.store, request_id)
     assert req is not None
-    assert (req.payload, req.result, req.status) == ({}, None, "error")
+    assert (req.payload, req.result, req.status) == ({}, {"ok": False, "error": "interrupted"}, "error")
 
 
 async def test_status_property(env):
@@ -100,6 +107,9 @@ async def test_status_property(env):
     assert ControlRequest(**base, handled_at="t", result={"ok": True}).status == "done"
     assert ControlRequest(**base, handled_at="t", result={"ok": False, "error": "x"}).status == "error"
     assert ControlRequest(**base, handled_at="t", result=None).status == "error"
+    row = dict(base, payload_json="{}", step_id=None, handled_at="t", result_json=None)
+    interrupted = _request_from_row(row)
+    assert (interrupted.status, interrupted.result) == ("error", {"ok": False, "error": "interrupted"})
 
 
 # --- apply_pending per kind ----------------------------------------------------------------------------
@@ -207,7 +217,7 @@ async def test_reroute_before_a_session_changes_the_agent_the_next_step_uses(env
     env.adapters.register(second)
     runner = env.runner(StubAgentExecutor())
     run_id = runner.start_run(REPO, make_issue(), agent_playbook(), agent="fake")
-    request_id = enqueue(env.store, run_id, "reroute", {"agent": "other"}, step_id=f"{run_id}/plan/1")
+    request_id = enqueue(env.store, run_id, "reroute", {"agent": "other"})
     await apply_pending(runner, env.store)
     assert result_of(env, request_id).result == {"ok": True, "from": "fake", "to": "other"}
     assert env.run(run_id).context["agent"] == "other"
@@ -304,3 +314,41 @@ async def test_tick_returns_only_the_advanced_step_count(env):
     enqueue(env.store, run_id, "retry_node", {"node": "zzz"})  # an error result, not a tick failure
     assert await runner.tick() == 1
     assert get_run(env.store, run_id).status == "running"
+
+
+# --- step-bound requests are applied once ---------------------------------------------------------------
+
+
+def escalation_run(env: Env):
+    pb = make_playbook(
+        {"fix": NOTIFY, "esc": {"kind": "escalate"}},
+        {"fix.sent": "esc", "esc.resolved": "@done"},
+    )
+    attention = {"needs_you": True, "reason": "stuck"}
+    ex = Scripted({"fix": [Done("sent")], "esc": [Waiting(output=attention, poll_after=60)]})
+    runner = env.runner(ex)
+    return runner, runner.start_run(REPO, make_issue(), pb)
+
+
+async def test_two_resumes_for_one_escalation_give_one_success_and_one_already_resolved(env):
+    runner, run_id = escalation_run(env)
+    await runner.tick()
+    await runner.tick()
+    esc = f"{run_id}/esc/1"
+    first = enqueue(env.store, run_id, "resume", {"to": "fix"}, step_id=esc)
+    second = enqueue(env.store, run_id, "resume", {"to": "fix"}, step_id=esc)
+    assert await apply_pending(runner, env.store) == 2
+    assert result_of(env, first).result == {"ok": True}
+    assert result_of(env, second).result == {"ok": False, "error": "already resolved"}
+    assert env.step_ids(run_id) == ["esc/1", "fix/1", "fix/2"]
+    (step,) = [s for s in env.steps(run_id) if s.node_id == "esc"]
+    assert (step.status, step.outcome) == ("done", "resolved")
+
+
+async def test_a_reroute_for_a_step_that_is_not_waiting_is_already_resolved(env):
+    runner, run_id = escalation_run(env)
+    env.adapters.register(FakeAdapter(name="other"))
+    request_id = enqueue(env.store, run_id, "reroute", {"agent": "other"}, step_id=f"{run_id}/esc/9")
+    await apply_pending(runner, env.store)
+    assert result_of(env, request_id).result == {"ok": False, "error": "already resolved"}
+    assert env.events("rerouted") == []

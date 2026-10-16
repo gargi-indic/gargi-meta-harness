@@ -36,6 +36,7 @@ class ApproveBody(_Body):
     note: Note | None = Field(default=None, description="Optional note recorded with the decision.")
     to: str | None = Field(
         default=None,
+        max_length=200,
         description="Escalation items only: the playbook node to resume at. Default: the node of the run's "
         "latest other finished step.",
     )
@@ -46,11 +47,13 @@ class RejectBody(_Body):
 
 
 class RerouteBody(_Body):
-    agent: str = Field(description="Name of an enabled agent in the repo config.")
+    agent: str = Field(max_length=200, description="Name of an enabled agent in the repo config.")
 
 
 class ResumeBody(_Body):
-    to: str | None = Field(default=None, description="Playbook node to resume at; default: continue.")
+    to: str | None = Field(
+        default=None, max_length=200, description="Playbook node to resume at; default: continue."
+    )
 
 
 class MessageBody(_Body):
@@ -122,6 +125,14 @@ def _item(store: Store, item_id: str) -> tuple[RunRow, StepRow]:
         if gate is None:
             raise HTTPException(status_code=404, detail="unknown inbox item")
         if gate.status != "pending":
+            raise HTTPException(status_code=409, detail="already resolved")
+    else:
+        queued = store.query(
+            "SELECT id FROM control_requests WHERE step_id = ? AND handled_at IS NULL "
+            "AND kind IN ('resume', 'reroute') LIMIT 1",
+            (item_id,),
+        )
+        if queued:
             raise HTTPException(status_code=409, detail="already resolved")
     return run, step
 
