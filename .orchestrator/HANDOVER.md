@@ -39,25 +39,28 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | Built by Jules via this orchestrator (one session at a time); the orchestrator merges after review | human |
 | 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
-## State (handover 2026-10-15, end of the third orchestrator session)
+## State (handover 2026-10-16, end of the fourth orchestrator session)
 **Done:**
-- M0 complete (epic #2 closed).
-- **M1 complete (epic #10 closed).** Merged: #11 `5e7055d`, #12 `67cddf4`, #13 `80b90ac`, #18 `378d76f`, #14 `7782fa2`, #17 `a1d80d1`, #20 `eb59950`, #16 `e4d2f89` (+ #77 `dd52d66` CI fix), #19 `28b83bd`, #15 `225623f`, #21 `51640d9`.
-- Suite: 745 tests; `main` CI green at `51640d9`. Binding specs for every M1 task are in `.orchestrator/specs/`.
+- M0 and M1 complete (epics #2, #10 closed). The human gave the go-ahead for M2 on 2026-10-16; the sandbox e2e (`docs/RUNBOOK.md`) is still not run: `gargi-indic/harness-sandbox` doesn't exist and `~/.config/jules/env` has no `ANTHROPIC_API_KEY`.
+- **M2 merged so far:** #23 M2.1 server skeleton (#81 `d5344d5`, Sonnet, one fix round), #24 M2.2 read-only API (#82 `cc39768`, Sonnet, one fix round). Suite 879 tests; `main` CI green.
+- Binding specs written: `specs/m23-server-skeleton.txt`, `m24-read-api.txt`, `m26-web-scaffold.txt`, `m27-canvas.txt`. **None yet for #25, #30, #28, #29, #31, #32.**
 
-**Nothing is running:** no Jules sessions (all archived), no subagents, no worktrees, no background waits. Stale PR #72 (resurrected Jules #14 session) was closed.
+**Running:**
+- **#26 M2.4 web scaffold on Jules**, session `4367269268796800841` (IN_PROGRESS at handover). Plan approved with `specs/m26-web-scaffold.txt` sent as binding corrections (port 7777, exact npm pins, TS 5.9.3, `scripts/export_playbook_schema.py` at the repo root, CI `web` job with `actions/setup-node@v7.1.0`). No background wait is left running.
+- Resume: `python3 .orchestrator/jules.py get 4367269268796800841`; then `wait` (background), review the PR against the spec (check the pins, the design-rules test, the drift step, and that `harness serve` serves `web/dist`), merge, `archive` the session.
 
-**Next (needs the human's go-ahead; the M1 mandate ended here):**
-1. Sandbox end-to-end per `docs/RUNBOOK.md`. This also verifies the real `claude-agent-sdk` API names in `harness/llm/backend.py` (never installed: no disk).
-2. M2 (epic #22): the build order and parallel pairs are in #1's body. Write specs first (none exist for M2).
+**Next (in order; two at a time, non-overlapping files):**
+1. Write `specs/m25-action-api.txt` and `specs/m30-playbook-api.txt`, then run #25 ∥ #30 (both unblocked now; both are Python and both touch `harness/server/app.py` router registration and `deps.py`, so either run them one after the other, or tell each to touch only its own router file plus a one-line registration and expect a trivial merge). #25 must reuse the Runner's existing pause/resume/cancel/retry methods (see `harness/cli.py` `_control`) and `harness/github/commands.py` `decide`/`resolve_gate`, not re-implement them.
+2. #27 canvas (spec ready) as soon as #26 merges; it can run beside #25/#30 (web only).
+3. Then #28, #29 (Run view: run ids contain `/` and `#`, e.g. `acme/widgets#5@1`; the UI must `encodeURIComponent` them; routes are `{run_id:path}`), #31, #32.
 
-**Follow-ups found in M1 (not filed as issues):**
-- `harness sync` doesn't rehydrate runs from ledger snapshots: `engine.model.rehydrate` is unwired, and repo playbooks need to be in the runner's lookup.
-- The validator accepts an empty `nodes` map, and `Runner.start_run` then raises `StopIteration`.
-- `harness init` doesn't create the control issue. The daemon doesn't start runs for new issues (no dispatcher).
-- The human's `~/.config/gargi-harness/config.toml` holds junk written by the old `tests/test_cli.py` leak (fixed in #21). It needs a manual reset.
+**#24 API facts for the web specs:** campaign id = repo full name, `/api/campaigns/{owner}/{repo}/graph`; `/api/board?campaign=owner/repo` has a `failed` column; inbox `kind` is an open string (`plan_approval|merge_approval|gate|question|escalation|<node kind>`); SSE types `run.updated|step.updated|activity|inbox.changed|issue.updated|log`; OpenAPI at `/api/openapi.json` (behind the cookie); seed fixture `tests/fixtures/server_seed.py` (`seed_store`, `seed_config`).
 
-**Environment:** the disk is ~300 MB free (the uv cache was pruned once with `uv cache prune`). Use `git worktree add` in the scratchpad, never `gh repo clone`, and remove each worktree right after its PR is reviewed.
+**Follow-ups found (not filed):**
+- From M1: `harness sync` doesn't rehydrate runs (`rehydrate` unwired); the validator accepts an empty `nodes` map; `harness init` doesn't create the control issue; no dispatcher in the daemon; the human's `~/.config/gargi-harness/config.toml` needs a manual reset.
+- From M2: a malformed `events.data_json` row makes `store.repo.events_since` raise, so the SSE tailer stalls on it; `store/repo.py`'s strict row models make one corrupt `runs.context_json` / `issues.labels_json` row 500 the read API (the #24 queries are already tolerant).
+
+**Environment:** ~2.5 GB disk free. Use `git worktree add` in the scratchpad for Sonnet builders, never `gh repo clone`; remove each worktree after merge. A `.venv` now exists in the main checkout (created by a `uv run` there).
 
 ## Lessons from this build (in addition to docs/LESSONS.md)
 1. **Archive every Jules session** (`jules.py archive`) after merge or handoff. Open sessions use up Jules's concurrency limit (new ones sit `PAUSED`), and an abandoned FAILED session came back to life and opened a duplicate PR (#65).
@@ -72,3 +75,5 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 10. **Gate merges on the exit status of `gh pr checks`**, never on piped output: `gh pr checks N | tail -1 && gh pr merge` merged a red PR (#76), because `tail` succeeds. Use `if gh pr checks N >/dev/null; then gh pr merge ...; fi`.
 11. **Cross-task contracts drift between specs.** When reviewing a merged PR, re-read the pending specs that consume its outputs: the session ref shape (#14 → #15) and `head_sha` in review outputs (#20 → #19) both had to be fixed in later specs.
 12. **Sonnet subagents in parallel with one Jules session work well** on non-overlapping files. M1's last 7 tasks took one session; Jules needed a Sonnet finish on #15 after two incomplete rounds.
+13. **Sonnet builder + a separate Sonnet first-pass reviewer works well for server tasks.** On #23 the reviewer found the launch token in uvicorn's access log (a real blocker) and a Ctrl-C hang with open SSE streams; on #24, corrupt-JSON 500s. Each took one small fix round, about 5 min.
+14. **Typer help output is ANSI-coloured on GitHub Actions** (but not locally): CLI help tests must set `NO_COLOR`/`TERM=dumb` and strip ANSI.
