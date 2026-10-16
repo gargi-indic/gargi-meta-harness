@@ -1,0 +1,9 @@
+apiVersion: harness/v1
+id: looping
+nodes:
+  ping: {kind: notify, message: ping, max_visits: 1000}
+  pong: {kind: notify, message: pong, max_visits: 1000}
+edges:
+  ping.sent: pong
+  pong.sent: ping
+  "*.exhausted": "@failed"

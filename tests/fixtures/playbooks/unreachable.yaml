@@ -1,0 +1,8 @@
+apiVersion: harness/v1
+id: unreachable-node
+nodes:
+  start: {kind: notify, message: hi}
+  orphan: {kind: notify, message: nobody comes here}
+edges:
+  start.sent: "@done"
+  orphan.sent: "@done"

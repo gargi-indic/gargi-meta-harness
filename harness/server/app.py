@@ -2,16 +2,19 @@
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
+import harness
 from harness import __version__
 from harness.config import GlobalConfig
+from harness.github.client import GitHub
 from harness.server.auth import COOKIE, TokenGuard, generate_token, token_matches
 from harness.server.deps import get_bus, get_config
 from harness.server.events import EventBus, EventLogTailer, parse_last_event_id, sse_stream
@@ -33,6 +36,9 @@ def create_app(
     tail_events: bool = True,
     keepalive_s: float = 15.0,
     tail_interval_s: float = 0.5,
+    gh: GitHub | None = None,
+    builtin_dir: Path | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     token = token if token is not None else generate_token()
     port = port if port is not None else config.port
@@ -59,6 +65,13 @@ def create_app(
     app.state.token = token
     app.state.port = port
     app.state.keepalive_s = keepalive_s
+    app.state.gh = gh
+    # `harness/playbooks` has no __init__.py, so `importlib.resources.files(...)` would give a MultiplexedPath
+    # whose str() is not a filesystem path; the directory sits next to this package's parent module instead.
+    app.state.builtin_dir = (
+        builtin_dir if builtin_dir is not None else Path(harness.__file__).parent / "playbooks"
+    )
+    app.state.clock = clock if clock is not None else (lambda: datetime.now(UTC))
     app.add_middleware(TokenGuard, token=token, port=port)
 
     @app.get("/auth")

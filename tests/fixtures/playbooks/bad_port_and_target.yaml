@@ -1,0 +1,10 @@
+apiVersion: harness/v1
+id: bad-edges
+nodes:
+  implement: {kind: agent, session: main, action: implement}
+edges:
+  implement.pr_ready: ghost
+  implement.needs_input: "@failed"
+  implement.failed: "@failed"
+  implement.timeout: "@failed"
+  implement.bogus: "@done"

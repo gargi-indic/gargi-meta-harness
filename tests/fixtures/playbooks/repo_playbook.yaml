@@ -1,0 +1,7 @@
+apiVersion: harness/v1
+id: repo-flow
+name: A playbook that lives in the repo
+nodes:
+  notify: {kind: notify, message: hello}
+edges:
+  notify.sent: "@done"

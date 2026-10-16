@@ -1,0 +1,9 @@
+apiVersion: harness/v1
+id: no-such-gate
+gates:
+  merge: human
+nodes:
+  approve: {kind: gate, gate: ship}
+edges:
+  approve.approved: "@done"
+  approve.rejected: "@failed"

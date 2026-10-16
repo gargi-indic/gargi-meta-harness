@@ -1,0 +1,9 @@
+apiVersion: harness/v1
+id: unbounded
+nodes:
+  ping: {kind: check, check: ci}
+  pong: {kind: notify, message: again}
+edges:
+  ping.pass: pong
+  ping.fail: "@failed"
+  pong.sent: ping
