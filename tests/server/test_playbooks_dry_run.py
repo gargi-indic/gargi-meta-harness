@@ -5,6 +5,8 @@ import asyncio
 import pytest
 
 import harness.server.dry_run as dry_run_module
+from harness.engine.executors.base import ExecutorRegistry
+from harness.engine.fakes import ScriptedExecutor
 from harness.playbook.load import load_playbook
 from harness.server.dry_run import dry_run
 from tests.server.playbooks_helpers import builtin_text, fixture_text, make_playbook_app, playbook_client
@@ -140,14 +142,23 @@ async def test_a_timeout_returns_the_trace_so_far(client, monkeypatch: pytest.Mo
     assert len(body["trace"]) < 1000
 
 
+class SlowExecutor(ScriptedExecutor):
+    async def advance(self, step, node, ctx):
+        await asyncio.sleep(0.01)
+        return await super().advance(step, node, ctx)
+
+
+def slow_registry(playbook, outcomes, trace, gates):
+    registry = ExecutorRegistry()
+    executor = SlowExecutor(outcomes, trace, gates)
+    for kind in {node.kind for node in playbook.nodes.values()}:
+        registry.register(kind, executor)
+    return registry
+
+
 async def test_a_slow_run_times_out(client, monkeypatch: pytest.MonkeyPatch) -> None:
-    real_sleep = asyncio.sleep
-
-    async def slow(_delay: float) -> None:
-        await real_sleep(0.01)
-
     monkeypatch.setattr(dry_run_module, "DRY_RUN_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(dry_run_module.asyncio, "sleep", slow)
+    monkeypatch.setattr(dry_run_module, "scripted_registry", slow_registry)
     body = (
         await client.post(URL, json={"yaml": fixture_text("looping.yaml"), "scenario": {"max_steps": 1000}})
     ).json()

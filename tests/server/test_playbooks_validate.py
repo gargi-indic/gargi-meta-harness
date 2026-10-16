@@ -142,6 +142,19 @@ async def test_a_scanner_error_is_a_syntax_issue_not_aliases(client) -> None:
     assert body["issues"][0]["code"] in ("yaml_syntax", "yaml_aliases")
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["a: " + "9" * 5000, "a: 9999-99-99", "a: 2001-12-14t21:59:43.10+99:99", "a: 2001-13-14"],
+    ids=["huge-int", "bad-date", "bad-tz", "bad-month"],
+)
+async def test_constructor_value_errors_are_syntax_issues(client, text: str) -> None:
+    body = await validate(client, text)
+    assert body["ok"] is False
+    [issue] = body["issues"]
+    assert issue["code"] == "yaml_syntax"
+    assert issue["message"]
+
+
 async def test_oversize_text_is_a_422(client) -> None:
     response = await client.post("/api/playbooks/validate", json={"yaml": "a" * 256_001})
     assert response.status_code == 422

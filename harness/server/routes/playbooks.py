@@ -3,6 +3,7 @@
 Fixed paths (``schema``, ``validate``, ``dry-run``, ``save``) are registered before ``/{playbook_id}``.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime
@@ -17,13 +18,14 @@ import harness.server.dry_run as dry_run_module
 from harness.config import GlobalConfig
 from harness.github.client import GitHub, GitHubError
 from harness.playbook.schema import playbook_json_schema
-from harness.server.deps import get_builtin_dir, get_clock, get_config, get_github
+from harness.server.deps import get_builtin_dir, get_clock, get_config, get_gh_token, get_github
 from harness.server.dry_run import DryRunResult
 from harness.server.playbook_service import (
     MAX_YAML_CHARS,
     Issue,
     PlaybookDetail,
     PlaybookSummary,
+    SaveConflict,
     SaveResult,
     ValidationResult,
     get_playbook,
@@ -113,7 +115,7 @@ async def list_playbooks(
     gh: Annotated[GitHub | None, Depends(get_github)],
     repo: Annotated[str | None, Query()] = None,
 ) -> list[PlaybookSummary]:
-    summaries = list_builtin(builtin_dir)
+    summaries = await list_builtin(builtin_dir)
     if repo is not None:
         _check_repo(repo, config)
         client = _need_github(gh)
@@ -132,7 +134,7 @@ async def playbook_schema() -> dict[str, Any]:
 @router.post("/validate", summary="Validate playbook YAML; always 200 for any YAML text")
 async def validate_playbook(body: ValidateRequest) -> ValidateResponse:
     caps = {name: set(values) for name, values in body.agents.items()} if body.agents is not None else None
-    result = validate_yaml(body.yaml, caps)
+    result = await asyncio.to_thread(validate_yaml, body.yaml, caps)
     return ValidateResponse(ok=result.ok, issues=result.issues)
 
 
@@ -142,7 +144,7 @@ async def validate_playbook(body: ValidateRequest) -> ValidateResponse:
     response_model=DryRunResult,
 )
 async def dry_run_playbook(body: DryRunRequest) -> DryRunResult | JSONResponse:
-    result = validate_yaml(body.yaml, None)
+    result = await asyncio.to_thread(validate_yaml, body.yaml, None)
     if not result.ok or result.playbook is None:
         return _invalid(result)
     playbook = result.playbook
@@ -168,11 +170,12 @@ async def save_playbook_route(
     config: Annotated[GlobalConfig, Depends(get_config)],
     gh: Annotated[GitHub | None, Depends(get_github)],
     now: Annotated[Callable[[], datetime], Depends(get_clock)],
+    gh_token: Annotated[str | None, Depends(get_gh_token)],
 ) -> SaveResult | JSONResponse:
     _check_id(body.id)
     _check_repo(body.repo, config)
     client = _need_github(gh)
-    result = validate_yaml(body.yaml, None)
+    result = await asyncio.to_thread(validate_yaml, body.yaml, None)
     if not result.ok or result.playbook is None:
         return _invalid(result)
     if result.playbook.id != body.id:
@@ -187,8 +190,16 @@ async def save_playbook_route(
         return await save_playbook(
             client, body.repo, body.id, body.yaml, body.message, body.base, now, warnings
         )
+    except SaveConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="a save for this playbook is already in progress; retry in a second",
+        ) from exc
     except GitHubError as exc:
-        raise HTTPException(status_code=502, detail=github_detail(exc, with_message=True)) from exc
+        secrets = [gh_token] if gh_token else None
+        raise HTTPException(
+            status_code=502, detail=github_detail(exc, with_message=True, secrets=secrets)
+        ) from exc
 
 
 @router.get("/{playbook_id}", summary="One playbook: YAML and parsed form")

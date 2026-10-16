@@ -250,6 +250,33 @@ async def test_a_github_error_is_a_502_with_the_secret_redacted(
     assert "ghp_supersecret12345" not in response.text
 
 
+async def test_a_cli_token_is_redacted_too(respx_mock) -> None:
+    """A token from `gh auth token` is not in the env; the server hands it over on app.state."""
+    app = make_playbook_app(gh=make_gh())
+    app.state.gh_token = "ghp_from-gh-cli-98765"
+    respx_mock.get(f"repos/{REPO}").mock(
+        return_value=Response(404, json={"message": "no ghp_from-gh-cli-98765"})
+    )
+    async with playbook_client(app) as client:
+        response = await client.post(URL, json={"repo": REPO, "id": "repo-flow", "yaml": YAML})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "github: 404 no [redacted]"
+
+
+async def test_a_taken_branch_name_is_a_409(client, respx_mock) -> None:
+    respx_mock.get(f"repos/{REPO}").mock(return_value=Response(200, json={"default_branch": "main"}))
+    respx_mock.get(f"repos/{REPO}/pulls").mock(return_value=Response(200, json=[]))
+    respx_mock.get(f"repos/{REPO}/git/ref/heads/main").mock(
+        return_value=Response(200, json={"object": {"sha": "abc123"}})
+    )
+    respx_mock.post(f"repos/{REPO}/git/refs").mock(
+        return_value=Response(422, json={"message": "Reference already exists"})
+    )
+    response = await client.post(URL, json={"repo": REPO, "id": "repo-flow", "yaml": YAML})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "a save for this playbook is already in progress; retry in a second"}
+
+
 async def test_a_transport_failure_is_a_502(client, respx_mock) -> None:
     respx_mock.get(f"repos/{REPO}").mock(side_effect=httpx.ConnectError("down"))
     response = await client.post(URL, json={"repo": REPO, "id": "repo-flow", "yaml": YAML})

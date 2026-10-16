@@ -26,6 +26,8 @@ URL_RE = re.compile(r"http://127\.0\.0\.1:(\d+)/auth\?token=(\S+)")
 def served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """`Server.run` runs only the (patched) startup, as if the socket bound, or fails to bind."""
     monkeypatch.setattr(config_module, "CONFIG_HOME", tmp_path / "config")
+    # Never read a real token (env or `gh auth token`) while serving in tests.
+    monkeypatch.setattr("harness.cli.github_token", lambda: "ghp_test-token-000000")
     save_global(GlobalConfig(port=8123, data_dir=tmp_path / "data", env_files=[]))
     state: dict = {"runs": [], "opened": [], "bound": True}
 
@@ -145,5 +147,6 @@ def test_serve_with_a_token_builds_the_client_and_never_prints_it(
     assert "ghp_secret-token-123456" not in result.output
     gh = served["runs"][0].app.state.gh
     assert gh is not None
+    assert served["runs"][0].app.state.gh_token == "ghp_secret-token-123456"
     assert "ghp_secret-token-123456" not in repr(gh)
     assert type(gh._cache).__name__ == "SqliteEtagCache"

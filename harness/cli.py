@@ -787,14 +787,14 @@ def build_server_config(application: "FastAPI", port: int) -> "uvicorn.Config":
     )
 
 
-def _serve_github(store: Store) -> GitHub | None:
-    """The server's GitHub client, or None (with one warning line) when no token is available."""
+def _serve_github(store: Store) -> tuple[GitHub | None, str | None]:
+    """The server's GitHub client and its token, or (None, None) with one warning line when there is no token."""
     try:
         token = github_token()
     except RuntimeError:
         print("GitHub not configured: repo playbooks and save are disabled")
-        return None
-    return GitHub(token=token, cache=SqliteEtagCache(store))
+        return None, None
+    return GitHub(token=token, cache=SqliteEtagCache(store)), token
 
 
 @app.command()
@@ -821,10 +821,11 @@ def serve(
     store.migrate()
     listen_port = port if port is not None else cfg.port
     token = generate_token()
-    gh = _serve_github(store)
+    gh, gh_token = _serve_github(store)
     web = create_app(
         store=store, config=cfg, token=token, web_dist=default_web_dist(), port=listen_port, gh=gh
     )
+    web.state.gh_token = gh_token
     url = f"http://127.0.0.1:{listen_port}/auth?token={token}"
 
     def announce() -> None:

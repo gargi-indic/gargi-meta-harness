@@ -28,6 +28,11 @@ def get_github(request: Request) -> GitHub | None:
     return getattr(request.app.state, "gh", None)
 
 
+def get_gh_token(request: Request) -> str | None:
+    """The token the server's GitHub client was built with; only used to redact error text."""
+    return getattr(request.app.state, "gh_token", None)
+
+
 def get_builtin_dir(request: Request) -> Path:
     return request.app.state.builtin_dir
 

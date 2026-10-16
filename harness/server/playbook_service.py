@@ -1,5 +1,6 @@
 """Playbook listing, reading, validation and save-as-PR for the editor API (M2.8)."""
 
+import asyncio
 import base64
 import logging
 import re
@@ -57,7 +58,7 @@ def _failed(*issues: Issue, playbook: Playbook | None = None) -> ValidationResul
     return ValidationResult(ok=False, issues=list(issues), playbook=playbook)
 
 
-def _yaml_syntax_issue(exc: yaml.YAMLError) -> Issue:
+def _yaml_syntax_issue(exc: Exception) -> Issue:
     mark = getattr(exc, "problem_mark", None)
     path = f"line {mark.line + 1}, column {mark.column + 1}" if mark is not None else None
     problem = getattr(exc, "problem", None) or str(exc)
@@ -136,7 +137,8 @@ def _validate_yaml(text: str, agent_caps: dict[str, set[str]] | None) -> Validat
         return _failed(guard)
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError) as exc:
+        # ValueError: constructors such as int (over 4300 digits), timestamps (9999-99-99, bad offsets).
         return _failed(_yaml_syntax_issue(exc))
     except RecursionError:
         return _failed(Issue(code="yaml_syntax", message="YAML is nested too deeply"))
@@ -189,7 +191,7 @@ def _builtin_files(builtin_dir: Path) -> list[tuple[str, str]]:
     return files
 
 
-def list_builtin(builtin_dir: Path) -> list[PlaybookSummary]:
+def _list_builtin_sync(builtin_dir: Path) -> list[PlaybookSummary]:
     summaries = []
     for name, text in _builtin_files(builtin_dir):
         result = validate_yaml(text, None)
@@ -199,6 +201,11 @@ def list_builtin(builtin_dir: Path) -> list[PlaybookSummary]:
             )
         )
     return sorted(summaries, key=lambda s: s.id)
+
+
+async def list_builtin(builtin_dir: Path) -> list[PlaybookSummary]:
+    # Parsing is CPU-bound; keep it off the event loop.
+    return await asyncio.to_thread(_list_builtin_sync, builtin_dir)
 
 
 async def _repo_entries(gh: GitHub, repo: str) -> list[dict[str, Any]]:
@@ -224,7 +231,7 @@ async def list_repo(gh: GitHub, repo: str) -> list[PlaybookSummary]:
         text = await gh.file_text(repo, entry["path"])
         if text is None:
             continue
-        result = validate_yaml(text, None)
+        result = await asyncio.to_thread(validate_yaml, text, None)
         summaries.append(
             PlaybookSummary(
                 id=_id_of(result, entry["path"]),
@@ -237,12 +244,19 @@ async def list_repo(gh: GitHub, repo: str) -> list[PlaybookSummary]:
     return sorted(summaries, key=lambda s: s.id)
 
 
-def _detail(
+async def _detail(
     playbook_id: str, source: Literal["builtin", "repo"], path: str, sha: str | None, text: str
 ) -> PlaybookDetail:
-    result = validate_yaml(text, None)
+    result = await asyncio.to_thread(validate_yaml, text, None)
     parsed = result.playbook.model_dump(mode="json") if result.playbook is not None else None
     return PlaybookDetail(id=playbook_id, source=source, path=path, sha=sha, yaml=text, parsed=parsed)
+
+
+def _find_builtin(builtin_dir: Path, playbook_id: str) -> tuple[str, str] | None:
+    for name, text in _builtin_files(builtin_dir):
+        if _id_of(validate_yaml(text, None), name) == playbook_id:
+            return name, text
+    return None
 
 
 async def get_playbook(
@@ -258,10 +272,11 @@ async def get_playbook(
                 continue
             text = await gh.file_text(repo, entry["path"])
             if text is not None:
-                return _detail(playbook_id, "repo", entry["path"], entry.get("sha"), text)
-    for name, text in _builtin_files(builtin_dir):
-        if _id_of(validate_yaml(text, None), name) == playbook_id:
-            return _detail(playbook_id, "builtin", f"playbooks/{name}", None, text)
+                return await _detail(playbook_id, "repo", entry["path"], entry.get("sha"), text)
+    found = await asyncio.to_thread(_find_builtin, builtin_dir, playbook_id)
+    if found is not None:
+        name, text = found
+        return await _detail(playbook_id, "builtin", f"playbooks/{name}", None, text)
     return None
 
 
@@ -279,10 +294,15 @@ class SaveResult(BaseModel):
     existing: bool = Field(description="True when an identical open PR was found and reused")
 
 
-def github_detail(exc: GitHubError, *, with_message: bool) -> str:
+class SaveConflict(Exception):
+    """The timestamped branch name is already taken: another save of the same playbook is in flight."""
+
+
+def github_detail(exc: GitHubError, *, with_message: bool, secrets: list[str] | None = None) -> str:
     detail = f"github: {exc.status}"
     if with_message:
-        detail = f"{detail} {redact(exc.message)}"
+        # `redact` knows the env tokens; a token that came from `gh auth token` has to be passed in.
+        detail = f"{detail} {redact(exc.message, secrets)}"
     return detail
 
 
@@ -337,7 +357,12 @@ async def save_playbook(
     sha = (await gh.get(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}"))["object"]["sha"]
     branch = f"harness/playbook-{playbook_id}-{now():%Y%m%d%H%M%S}"
     assert branch != base
-    await gh.post(f"repos/{repo}/git/refs", ref=f"refs/heads/{branch}", sha=sha)
+    try:
+        await gh.post(f"repos/{repo}/git/refs", ref=f"refs/heads/{branch}", sha=sha)
+    except GitHubError as exc:
+        if exc.status == 422 and "already exists" in exc.message.lower():
+            raise SaveConflict(branch) from exc
+        raise
     path = f"{REPO_DIR}/{playbook_id}.yaml"
     payload: dict[str, Any] = {}
     try:
