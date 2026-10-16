@@ -74,7 +74,7 @@ export interface Playbook {
   edges: Edges;
 }
 export interface Gates {
-  [k: string]: ("human" | "auto") | AutoIf;
+  [k: string]: "human" | "auto" | AutoIf;
 }
 export interface AutoIf {
   auto_if: AutoIf1;
