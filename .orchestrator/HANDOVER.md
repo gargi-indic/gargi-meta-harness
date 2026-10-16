@@ -39,29 +39,25 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | Built by Jules via this orchestrator (one session at a time); the orchestrator merges after review | human |
 | 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
-## State (handover 2026-10-15, end of the first session)
+## State (handover 2026-10-15, end of the third orchestrator session)
 **Done:**
-- M0 is complete (#3–#9; epic #2 closed).
-- M1 merged so far: #11 `5e7055d`, #12 `67cddf4`, #13 `80b90ac`, #18 `378d76f`. Suite: 337 tests on `main`.
+- M0 complete (epic #2 closed).
+- **M1 complete (epic #10 closed).** Merged: #11 `5e7055d`, #12 `67cddf4`, #13 `80b90ac`, #18 `378d76f`, #14 `7782fa2`, #17 `a1d80d1`, #20 `eb59950`, #16 `e4d2f89` (+ #77 `dd52d66` CI fix), #19 `28b83bd`, #15 `225623f`, #21 `51640d9`.
+- Suite: 745 tests; `main` CI green at `51640d9`. Binding specs for every M1 task are in `.orchestrator/specs/`.
 
-**#14 (engine runner) is NOT started in code.**
-- Jules asked for help three times without pushing anything. Its session `18193645226373843116` was told to stop and was archived; if it still shows IN_PROGRESS, archive it again with `jules.py archive`. Ignore any branch or PR it might still produce.
-- No branch exists. The next step is to **give #14 to a Sonnet subagent, implementing from `main`**, with the binding spec `.orchestrator/specs/m14-engine.txt` **plus** `.orchestrator/specs/m14-engine-addendum.txt`.
-- Then review the PR yourself. This is the most important review in M1: probe the crash matrix, routing, `prev`, and the mirroring enqueues.
+**Nothing is running:** no Jules sessions (all archived), no subagents, no worktrees, no background waits. Stale PR #72 (resurrected Jules #14 session) was closed.
 
-**Ready specs for the next tasks** (all in `.orchestrator/specs/`): `m15-agent-executors.txt`, `m17-checks.txt` and `m20-merge.txt` (#20 adds a new `tick_boxes` outbox op). #16 (gates and slash commands) and #19 (reviewer) still need specs.
+**Next (needs the human's go-ahead; the M1 mandate ended here):**
+1. Sandbox end-to-end per `docs/RUNBOOK.md`. This also verifies the real `claude-agent-sdk` API names in `harness/llm/backend.py` (never installed: no disk).
+2. M2 (epic #22): the build order and parallel pairs are in #1's body. Write specs first (none exist for M2).
 
-**Order after #14:** run #15, #16, #17, #19 and #20 two at a time (one Jules session plus one Sonnet task, on non-overlapping files), then #21. Then close epic #10 and post an M1 summary on #1. The human asked for M1 to run end to end without asking.
+**Follow-ups found in M1 (not filed as issues):**
+- `harness sync` doesn't rehydrate runs from ledger snapshots: `engine.model.rehydrate` is unwired, and repo playbooks need to be in the runner's lookup.
+- The validator accepts an empty `nodes` map, and `Runner.start_run` then raises `StopIteration`.
+- `harness init` doesn't create the control issue. The daemon doesn't start runs for new issues (no dispatcher).
+- The human's `~/.config/gargi-harness/config.toml` holds junk written by the old `tests/test_cli.py` leak (fixed in #21). It needs a manual reset.
 
-**Environment:**
-- The disk is nearly full (about 0.5–1.4 GB free). Never `gh repo clone`; use `git worktree add` from `/Applications/code/gargi-meta-harness`, and remove worktrees afterwards.
-- The network has been dropping (DNS ENOTFOUND). Retry after a pause, and resume interrupted subagents with SendMessage.
-- No worktrees, background waits or subagents were left running at handover.
-
-**Helpers** (all under `.orchestrator/tools/`):
-- `log.py row <issue> <emoji> [session] [pr]` and `log.py current <active> <session> <pr> <next>` edit #1's tables via REST.
-- `tick.sh <issue>` ticks the boxes and closes the issue.
-- `acts.py` pretty-prints `jules.py activities` output.
+**Environment:** the disk is ~300 MB free (the uv cache was pruned once with `uv cache prune`). Use `git worktree add` in the scratchpad, never `gh repo clone`, and remove each worktree right after its PR is reviewed.
 
 ## Lessons from this build (in addition to docs/LESSONS.md)
 1. **Archive every Jules session** (`jules.py archive`) after merge or handoff. Open sessions use up Jules's concurrency limit (new ones sit `PAUSED`), and an abandoned FAILED session came back to life and opened a duplicate PR (#65).
@@ -73,3 +69,6 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 7. **`gh issue edit` (GraphQL) failed intermittently;** use REST (`gh api ... --method PATCH`).
 8. **The machine can sleep mid-task.** After waking, check GitHub and Jules connectivity, then resume interrupted subagents with SendMessage (their context survives).
 9. **Small, well-specified tasks on the critical path** are much faster with a Sonnet subagent (about 3–5 min) than with Jules (30–90 min). Use Jules for larger tasks while Sonnet works on independent ones.
+10. **Gate merges on the exit status of `gh pr checks`**, never on piped output: `gh pr checks N | tail -1 && gh pr merge` merged a red PR (#76), because `tail` succeeds. Use `if gh pr checks N >/dev/null; then gh pr merge ...; fi`.
+11. **Cross-task contracts drift between specs.** When reviewing a merged PR, re-read the pending specs that consume its outputs: the session ref shape (#14 → #15) and `head_sha` in review outputs (#20 → #19) both had to be fixed in later specs.
+12. **Sonnet subagents in parallel with one Jules session work well** on non-overlapping files. M1's last 7 tasks took one session; Jules needed a Sonnet finish on #15 after two incomplete rounds.
