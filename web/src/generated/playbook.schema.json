@@ -1,0 +1,835 @@
+{
+  "$defs": {
+    "AgentNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "agent",
+          "default": "agent",
+          "title": "Kind",
+          "type": "string"
+        },
+        "session": {
+          "title": "Session",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "plan",
+            "implement",
+            "revise"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "agent": {
+          "default": "{{ issue.agent }}",
+          "title": "Agent",
+          "type": "string"
+        },
+        "expect": {
+          "anyOf": [
+            {
+              "enum": [
+                "plan",
+                "pr"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expect"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message"
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+[smh]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        }
+      },
+      "required": [
+        "session",
+        "action"
+      ],
+      "title": "AgentNode",
+      "type": "object"
+    },
+    "AutoIf": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_if": {
+          "title": "Auto If",
+          "type": "string"
+        }
+      },
+      "required": [
+        "auto_if"
+      ],
+      "title": "AutoIf",
+      "type": "object"
+    },
+    "BranchCase": {
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "title": "When",
+          "type": "string"
+        },
+        "port": {
+          "title": "Port",
+          "type": "string"
+        }
+      },
+      "required": [
+        "when",
+        "port"
+      ],
+      "title": "BranchCase",
+      "type": "object"
+    },
+    "BranchNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "branch",
+          "default": "branch",
+          "title": "Kind",
+          "type": "string"
+        },
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/BranchCase"
+          },
+          "title": "Cases",
+          "type": "array"
+        },
+        "default": {
+          "type": "string",
+          "title": "Default"
+        }
+      },
+      "required": [
+        "cases",
+        "default"
+      ],
+      "title": "BranchNode",
+      "type": "object"
+    },
+    "CheckNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "check",
+          "default": "check",
+          "title": "Kind",
+          "type": "string"
+        },
+        "check": {
+          "enum": [
+            "ci",
+            "scope",
+            "pinned_versions",
+            "command"
+          ],
+          "title": "Check",
+          "type": "string"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        }
+      },
+      "required": [
+        "check"
+      ],
+      "title": "CheckNode",
+      "type": "object"
+    },
+    "DecomposeNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "decompose",
+          "default": "decompose",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "DecomposeNode",
+      "type": "object"
+    },
+    "EscalateNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "escalate",
+          "default": "escalate",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "EscalateNode",
+      "type": "object"
+    },
+    "GateNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "gate",
+          "default": "gate",
+          "title": "Kind",
+          "type": "string"
+        },
+        "gate": {
+          "title": "Gate",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate"
+      ],
+      "title": "GateNode",
+      "type": "object"
+    },
+    "JoinNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "join",
+          "default": "join",
+          "title": "Kind",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "all",
+            "any",
+            "select"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "inputs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inputs"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "JoinNode",
+      "type": "object"
+    },
+    "Limits": {
+      "additionalProperties": false,
+      "properties": {
+        "budget_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Budget Usd"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+[smh]$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout"
+        }
+      },
+      "title": "Limits",
+      "type": "object"
+    },
+    "MergeNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "merge",
+          "default": "merge",
+          "title": "Kind",
+          "type": "string"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "enum": [
+                "squash",
+                "merge",
+                "rebase"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        }
+      },
+      "title": "MergeNode",
+      "type": "object"
+    },
+    "NotifyNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "notify",
+          "default": "notify",
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "NotifyNode",
+      "type": "object"
+    },
+    "ParallelNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "parallel",
+          "default": "parallel",
+          "title": "Kind",
+          "type": "string"
+        },
+        "branches": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Branches",
+          "type": "array"
+        }
+      },
+      "required": [
+        "branches"
+      ],
+      "title": "ParallelNode",
+      "type": "object"
+    },
+    "ReviewNode": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "max_visits": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Visits"
+        },
+        "kind": {
+          "const": "review",
+          "default": "review",
+          "title": "Kind",
+          "type": "string"
+        },
+        "target": {
+          "enum": [
+            "plan",
+            "pr",
+            "question"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "checklist": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Checklist",
+          "type": "array"
+        }
+      },
+      "required": [
+        "target",
+        "checklist"
+      ],
+      "title": "ReviewNode",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "harness/v1",
+      "title": "Apiversion",
+      "type": "string"
+    },
+    "id": {
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description"
+    },
+    "gates": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "enum": [
+              "human",
+              "auto"
+            ],
+            "type": "string"
+          },
+          {
+            "$ref": "#/$defs/AutoIf"
+          }
+        ]
+      },
+      "title": "Gates",
+      "type": "object"
+    },
+    "limits": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Limits"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "inputs": {
+      "additionalProperties": true,
+      "title": "Inputs",
+      "type": "object"
+    },
+    "nodes": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]*$": {
+          "discriminator": {
+            "mapping": {
+              "agent": "#/$defs/AgentNode",
+              "branch": "#/$defs/BranchNode",
+              "check": "#/$defs/CheckNode",
+              "decompose": "#/$defs/DecomposeNode",
+              "escalate": "#/$defs/EscalateNode",
+              "gate": "#/$defs/GateNode",
+              "join": "#/$defs/JoinNode",
+              "merge": "#/$defs/MergeNode",
+              "notify": "#/$defs/NotifyNode",
+              "parallel": "#/$defs/ParallelNode",
+              "review": "#/$defs/ReviewNode"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AgentNode"
+            },
+            {
+              "$ref": "#/$defs/ReviewNode"
+            },
+            {
+              "$ref": "#/$defs/CheckNode"
+            },
+            {
+              "$ref": "#/$defs/GateNode"
+            },
+            {
+              "$ref": "#/$defs/BranchNode"
+            },
+            {
+              "$ref": "#/$defs/ParallelNode"
+            },
+            {
+              "$ref": "#/$defs/JoinNode"
+            },
+            {
+              "$ref": "#/$defs/DecomposeNode"
+            },
+            {
+              "$ref": "#/$defs/MergeNode"
+            },
+            {
+              "$ref": "#/$defs/EscalateNode"
+            },
+            {
+              "$ref": "#/$defs/NotifyNode"
+            }
+          ]
+        }
+      },
+      "title": "Nodes",
+      "type": "object"
+    },
+    "edges": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Edges",
+      "type": "object"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "id",
+    "nodes",
+    "edges"
+  ],
+  "title": "Playbook",
+  "type": "object"
+}
