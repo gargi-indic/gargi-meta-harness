@@ -10,6 +10,7 @@ from harness.store.db import Store
 TOKEN = "test-launch-token"
 PORT = 7777
 BASE_URL = f"http://127.0.0.1:{PORT}"
+AUTH = {"Cookie": f"harness_token={TOKEN}"}
 
 
 def make_store() -> Store:

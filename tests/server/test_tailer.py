@@ -32,8 +32,16 @@ async def test_publishes_new_rows_once_in_order() -> None:
     assert await tailer.poll_once() == 1
     assert await tailer.poll_once() == 0
     events = await buffered(bus)
-    assert [e.type for e in events] == ["run_started", "step_done", "run_done"]
-    assert [e.data["id"] for e in events] == [first, second, third]
+    assert [e.type for e in events] == [
+        "run.updated",
+        "issue.updated",
+        "step.updated",
+        "inbox.changed",
+        "run.updated",
+        "issue.updated",
+        "inbox.changed",
+    ]
+    assert [e.data["id"] for e in events] == [first, first, second, second, third, third, third]
     assert events[0].data["repo"] == "acme/r"
     assert events[0].data["issue"] == 5
     assert events[0].data["run_id"] == "run1"
@@ -95,7 +103,7 @@ async def test_store_error_is_logged_and_retried(
     assert SECRET not in caplog.text
     assert "retry" in caplog.text
     assert await tailer.poll_once() == 1
-    assert [e.type for e in await buffered(bus)] == ["one"]
+    assert [e.type for e in await buffered(bus)] == ["log"]
 
 
 async def test_run_polls_then_sleeps_until_cancelled() -> None:
@@ -114,7 +122,7 @@ async def test_run_polls_then_sleeps_until_cancelled() -> None:
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(tailer.run(), TIMEOUT)
     assert sleeps == [0.25, 0.25, 0.25]
-    assert [e.type for e in await buffered(bus)] == ["late"]
+    assert [e.data["kind"] for e in await buffered(bus)] == ["late"]
 
 
 async def test_lifespan_runs_the_tailer_and_stops_it_with_the_bus(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,7 +152,7 @@ async def test_lifespan_runs_the_tailer_and_stops_it_with_the_bus(monkeypatch: p
         await asyncio.wait_for(slept.wait(), TIMEOUT)  # second poll done
         assert bus.last_seq == 1
     assert state["cancelled"] is True
-    assert [e.type for e in await buffered(bus)] == ["while_serving"]  # and the bus was closed
+    assert [e.data["kind"] for e in await buffered(bus)] == ["while_serving"]  # and the bus was closed
 
 
 async def test_a_row_that_cannot_be_published_is_skipped_not_retried(
@@ -154,7 +162,7 @@ async def test_a_row_that_cannot_be_published_is_skipped_not_retried(
 
     class PickyBus(EventBus):
         def publish(self, type: str, data):
-            if type == "poison":
+            if data["kind"] == "poison":
                 raise ValueError(f"cannot serialise {SECRET}")
             return super().publish(type, data)
 
@@ -166,7 +174,7 @@ async def test_a_row_that_cannot_be_published_is_skipped_not_retried(
     append_event(store, kind="good2", data={})
     assert await tailer.poll_once() == 2
     assert await tailer.poll_once() == 0
-    assert [e.type for e in await buffered(bus)] == ["good1", "good2"]
+    assert [e.data["kind"] for e in await buffered(bus)] == ["good1", "good2"]
     assert "skipped" in caplog.text
     assert SECRET not in caplog.text
 
