@@ -400,3 +400,54 @@ async def test_run_with_fake_sleep(respx_mock, store: Store, gh: GitHub, clock: 
     outbox = Outbox(store, gh, clock=clock, sleep=fake_sleep)
     await outbox.run(stop_event, idle_sleep=2.0)
     assert sleep_count == 2
+
+
+async def test_tick_boxes_helper():
+    from harness.github.outbox import tick_boxes
+
+    body = (
+        "Intro [ ] mid-line and `- [ ]` inline code\r\n"
+        "- [ ] dash\r\n"
+        "* [ ] star\r\n"
+        "+ [ ] plus\r\n"
+        "  - [ ] nested\r\n"
+        "- [x] already\r\n"
+        "- [ ]no space after is still a box\r\n"
+        "text - [ ] not at line start\r\n"
+    )
+    assert tick_boxes(body) == (
+        "Intro [ ] mid-line and `- [ ]` inline code\r\n"
+        "- [x] dash\r\n"
+        "* [x] star\r\n"
+        "+ [x] plus\r\n"
+        "  - [x] nested\r\n"
+        "- [x] already\r\n"
+        "- [x]no space after is still a box\r\n"
+        "text - [ ] not at line start\r\n"
+    )
+
+
+async def test_tick_boxes_op_patches_ticked_body(respx_mock, store: Store, gh: GitHub, clock: FakeClock):
+    outbox = Outbox(store, gh, clock=clock)
+    outbox.enqueue("tick_boxes", {"repo": "a/b", "issue": 1})
+    respx_mock.get("https://api.github.com/repos/a/b/issues/1").respond(
+        200, json={"body": "Intro\r\n- [ ] one\r\n- [x] two\r\nEnd"}
+    )
+    patch = respx_mock.patch("https://api.github.com/repos/a/b/issues/1").respond(200, json={})
+
+    assert await outbox.drain_once() == 1
+    assert json.loads(patch.calls.last.request.content) == {"body": "Intro\r\n- [x] one\r\n- [x] two\r\nEnd"}
+
+
+async def test_tick_boxes_op_skips_patch_when_nothing_to_tick(
+    respx_mock, store: Store, gh: GitHub, clock: FakeClock
+):
+    outbox = Outbox(store, gh, clock=clock)
+    outbox.enqueue("tick_boxes", {"repo": "a/b", "issue": 1})
+    respx_mock.get("https://api.github.com/repos/a/b/issues/1").respond(
+        200, json={"body": "- [x] done\ntext"}
+    )
+
+    assert await outbox.drain_once() == 1
+    rows = store.query("SELECT status FROM outbox")
+    assert rows[0]["status"] == "sent"
