@@ -1,0 +1,31 @@
+Addendum to m14-engine.txt (binding; written when #14 moved from Jules to a Sonnet implementer). Where this differs from m14-engine.txt, this wins.
+
+A. Template agent resolution
+- Never use `templating.evaluate()` for string fields; it is boolean-only. String node fields (`agent`, `message`, `prompt`) use `templating.render(text, ctx.template, path=f"nodes.{node_id}.<field>")`.
+- `Context.issue.agent` is resolved by one runner helper: `run.context["agent"]` (from `start_run(agent=)`), else the first `agent:<x>` label of the cached IssueRow, else `repo_config.default_agent` (use `RepoConfig()` when the runner has no config for the repo). `issue.playbook` = run.playbook_id.
+- The runner must work when the IssueRow is not cached (build `IssueCtx(number=run.issue, title="", agent=...)`).
+
+B. PR in the run context
+- When a step finishes `Done` and `output` contains a dict `pr` with an int `number`, the runner sets `run.context["pr"] = output["pr"]` (keys `number`, `url`, `head_sha`) in the same transaction. The template `pr` is `PrCtx(**run.context["pr"])` (ignore unknown keys) or None.
+- The control-table row's `pr` column and the ledger summary show `#<number>` from it.
+
+C. Event comments and needs-you (single owner: the runner)
+- Executors never enqueue `set_labels`/`edit_issue_body`/`upsert_ledger`; the runner owns those.
+- When a step goes into `Waiting` with `output.get("needs_you")` true and it was not already waiting with needs_you, the runner sets the run to `needs-you` and enqueues ONE event comment `needs you` with bullets: `output.get("reason")` (if any), then each of `output.get("links", [])`. Re-polls of the same waiting step never comment again.
+- Gate (#16) and escalate (#15) executors supply `reason` and `links` in that Waiting output and must not post their own needs-you comment.
+
+D. Resume semantics
+- `resume(run_id)` on a `paused` run → `running` (or `needs-you` if a waiting step still requests it).
+- `resume(run_id, to=node)`: every step of the run that is `waiting` with `output.needs_you` true is set to `done` with outcome `resolved` and is NOT routed; then a new pending visit of `to` is inserted (it increments the visit counter but ignores `max_visits`: this is a human override), `prev` for it = the latest output of the resolved step (or None), and the run becomes `running`. Unknown node → `ValueError`. Record a `resumed` event.
+
+E. Status values are exactly `running`, `needs-you`, `paused`, `done`, `failed`, `cancelled` (never `completed`).
+
+F. `tick()` semantics
+- Selects steps with status `pending`, plus `waiting` with `poll_after` NULL or `<=` now (now from the injected clock, formatted like `Store.now()`), for runs whose status is `running` or `needs-you`, ordered by step id. A `Waiting` result counts as an advanced step. A step whose node kind is `parallel` is handled by the runner (§4 of the spec). `JoinExecutor` is registered by the runner itself under kind `join` if the caller did not register one.
+- Each step is advanced in its own `try`; an executor exception becomes `Done("failed", ...)` for that step only (§4), never aborts the tick, never is swallowed silently.
+
+G. Test playbook for the happy path and the crash matrix
+- nodes (in order): `plan {kind: agent, session: main, action: plan, agent: "{{ issue.agent }}"}`, `implement {kind: agent, session: main, action: implement, agent: "{{ issue.agent }}"}`; edges: `plan.plan_ready: implement`, `plan.pr_ready: "@done"`, `implement.pr_ready: "@done"`, `"*.failed": "@failed"`.
+- Test-only `StubAgentExecutor` (in `tests/engine/`): adapter = `ctx.adapters.get(render(node.agent, ctx.template))`; key `f"{ctx.run.id}/{node.session}"`; ref = `step.ref` or `adapter.find(key)` or `adapter.start(StartRequest(..., mode="plan_first", idempotency_key=key))`; for `implement`, on the first call for the step (no `approved` flag in step.ref) call `approve_plan` once and return `Waiting(ref={**ref, "approved": True}, poll_after=0)`; then poll: PLAN_READY → `Done("plan_ready", {"plan": ...})` (plan action), PR_READY → `Done("pr_ready", {"pr": snap.pr.model_dump()})`, FAILED → `Done("failed", {"error": ...})`, else Waiting with the ref (keep the flag).
+- The SAME FakeAdapter instance is registered in the crashed Runner and in the fresh Runner (it models the remote agent). Assert exactly one `start` and one `approve_plan` call, run `done`, `run.context["pr"]["number"] == 101`, no duplicate step ids.
+- Drive with a bounded loop (`for _ in range(50)`), advancing the fake clock; fail if not terminal. No real sleeps.
