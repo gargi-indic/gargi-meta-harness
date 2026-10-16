@@ -1,0 +1,76 @@
+Binding details for #21 (M1.11 harness run / daemon wiring, sandbox runbook). These override the issue where they differ. This is the integration task: wire what is merged, do not re-implement it.
+- Engine: `harness/engine/runner.py` (`Runner(store, outbox, executors, adapters, *, gh, repo_configs, clock, playbooks)`, `start_run`, `tick`, `run_forever`, `RunExists`), `harness/engine/executors/` (`base.py` registry; `agent.py` AgentExecutor, `escalate.py`, `notify.py`, `branch.py`, `check.py` CheckExecutor, `gate.py` GateExecutor, `merge.py` MergeExecutor, `review.py` ReviewExecutor), `harness/engine/model.py`.
+- GitHub: `harness/github/{client,outbox,ledger,labels,control_table,commands}.py` (`poll_commands`), `harness/store/etag_cache.py`, `harness/sync.py` (`sync_repo`).
+- `harness/llm/backend.py` (`ClaudeSdkBackend`, `FakeBackend`), `harness/adapters/{base,fake,jules}.py`, `harness/playbook/load.py` (`load_playbook`, `builtin_playbooks`), `harness/config.py`, `harness/secrets.py`, `harness/cli.py` (existing commands incl. #16's gates/approve/...).
+Read the real signatures on main first. If something named here does not exist, use the closest existing API and list it in the PR body. Do not change merged modules except as listed in §1.
+
+## 1. Files
+- `harness/app.py` (new), `harness/lock.py` (new), `harness/daemon.py` (new)
+- `harness/cli.py`: add `run`, `daemon`, `runs`, `show`; switch #16's control commands to use `build_app` where that removes duplication (keep their behaviour and tests green).
+- `harness/engine/executors/__init__.py`: add `default_registry(*, review_backend) -> ExecutorRegistry` (the only change there).
+- `docs/RUNBOOK.md` (new)
+- `tests/test_app.py`, `tests/test_lock.py`, `tests/test_daemon.py`, `tests/test_run_e2e.py` (new)
+- `tests/test_cli.py`: fix the existing leak: it sets `GARGI_HARNESS_CONFIG` after `harness.config` is imported, so `save_global` writes the developer's real `~/.config/gargi-harness/config.toml`. Monkeypatch `harness.config.CONFIG_HOME` (as `tests/test_cli_gates.py` does) or make the config path resolve lazily; no test may write outside `tmp_path`.
+No new dependencies; pyproject.toml/uv.lock unchanged.
+
+## 2. `default_registry`
+Registers kinds: `agent` → AgentExecutor(), `review` → ReviewExecutor(review_backend), `check` → CheckExecutor(), `gate` → GateExecutor(), `merge` → MergeExecutor(), `escalate`, `notify`, `branch`. (`join` is registered by the Runner; `parallel` is handled by the runner; `decompose` is M4 and stays unregistered.) Add a test that every node kind used by every built-in playbook except `decompose` and `join`/`parallel` has an executor.
+
+## 3. `harness/app.py`
+```python
+@dataclass
+class App:
+    cfg: GlobalConfig; store: Store; gh: GitHub; outbox: Outbox; adapters: AdapterRegistry
+    executors: ExecutorRegistry; review_backend: ReviewBackend; runner: Runner
+    repo_configs: dict[str, RepoConfig]
+    async def aclose(self) -> None: ...   # closes gh and adapters that have aclose()
+
+def build_app(cfg: GlobalConfig, *, gh: GitHub | None = None, adapters: AdapterRegistry | None = None,
+              review_backend: ReviewBackend | None = None, clock: Callable[[], float] = time.time,
+              sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> App
+```
+- Store at `cfg.db_path` (migrated). `load_env_files(cfg.env_files)` first. GitHub with the SQLite ETag cache and `github_token()` unless `gh` is injected.
+- Adapters (unless injected): `FakeAdapter` always registered as `fake`; `JulesAdapter` registered when `JULES_API_KEY` is set (never log or print the key).
+- Review backend default `ClaudeSdkBackend()` (lazy import; it only fails when a review actually runs without the extra).
+- `repo_configs`: for each registered repo, `parse_repo_config` of the config stored by sync (`get_repo(...)["config_json"]` or whatever sync stores; default `RepoConfig()`).
+- `playbooks` for the Runner: built-ins (by id) — repo playbooks are added per run (§4).
+
+## 4. `harness run <owner/repo> <issue> [--playbook ID] [--agent NAME] [--max-ticks N]`
+- `sync_repo` the repo (or at least fetch and cache the issue).
+- If a non-terminal run already exists for the issue, CONTINUE it (print `continuing <run id>`) instead of starting a new one; this is how a run resumes after `needs-you` was resolved (e.g. `harness approve`).
+- Else resolve: playbook = `--playbook` > the issue's `playbook:<x>` label > `repo_config.default_playbook`; looked up in `.harness/playbooks/<id>.yaml` of the repo (`gh.file_text`, parsed with `load_playbook`; the git blob sha from the contents API is `playbook_sha` if easily available, else None) then in the built-ins; unknown → exit 1 with a one-line error. Agent = `--agent` > `agent:<x>` label > `repo_config.default_agent`; an agent not in the adapter registry → exit 1. Then `start_run`.
+- Foreground loop: `await runner.tick()`, `await outbox.drain_once()` (or the outbox's equivalent), print each new event of this run as one line (`events_since`), until the run is terminal or `needs-you` (then print what is needed: the needs-you reason and gate id) or `--max-ticks` is hit. Between ticks sleep `min(5.0, seconds until the earliest poll_after)` via the injected sleep. Exit code 0 for `done` and `needs-you`, 1 for `failed`/`cancelled`.
+
+## 5. Run lock (`harness/lock.py`)
+- The lock lives in the control issue's ledger comment (`find_ledger`/`render_ledger`/`parse_ledger` from `ledger.py`), as `snapshot["lock"] = {"host", "pid", "token", "since", "heartbeat"}` (ISO times). Other snapshot keys are preserved.
+- `async acquire(gh, repo, control_issue, *, host, pid, now_iso, force=False, stale_after=900) -> Lock`: read the control issue's comments; a lock held by someone else whose `heartbeat` is younger than `stale_after` seconds → raise `LockHeld(holder)` unless `force`. Same host+pid → re-acquire. Write the ledger directly (edit or create the comment; this is synchronous by design, not via the outbox), then re-read and verify the token is ours (else `LockHeld`).
+- `async heartbeat(lock, now_iso)`, `async release(lock)` (removes `lock`, keeps other keys).
+- Repos without `control_issue`: no lock; the daemon logs a warning event and still runs them.
+
+## 6. `harness daemon [--force-unlock]` (`harness/daemon.py`)
+`async run_daemon(app, stop: asyncio.Event, *, host, pid, force_unlock=False, sync_every=300, commands_every=30, heartbeat_every=60, idle=1.0)`:
+- Acquire the lock for every registered repo first; `LockHeld` → print the holder and exit 1 (nothing started).
+- Then run concurrently until `stop`: `runner.run_forever(stop)`, the outbox drain loop, `poll_commands` per repo every `commands_every`, `sync_repo` per repo every `sync_every`, lock heartbeats every `heartbeat_every`. Exceptions in a periodic job are recorded as events and do not stop the daemon.
+- SIGINT/SIGTERM set `stop` (installed by the CLI command with `loop.add_signal_handler`). On stop: wait for the tasks, release the locks, `app.aclose()`.
+
+## 7. `harness runs [--repo R] [--status S]` and `harness show <run>`
+`runs`: table of id, issue, playbook, status, active nodes, PR. `show`: run fields, steps (node, visit, status, outcome, a one-line output summary capped at 200 chars, redacted), then the last 50 events. Unknown run → exit 1.
+
+## 8. `docs/RUNBOOK.md`
+1. Setup: install (`uv tool install` or `uv run`), env files (`~/.config/jules/env` with mode 600, `GH_TOKEN`/`gh auth token`, `ANTHROPIC_API_KEY` for the reviewer, `uv sync --extra claude`), `harness init <repo>` (labels, control issue), `.harness/config.yaml` example with every field from `RepoConfig`, `.harness/playbooks/` and `.harness/checklists/`.
+2. Sandbox end-to-end: create a private sandbox repo; one issue "add `slugify()` with tests" with Scope/Acceptance criteria/Out of scope; `gates: {plan: auto, merge: human}`; `harness run` → plan → review → implement → CI → scope → PR review → `needs-you` at merge; approve via `harness approve <issue>`; repeat with a second issue approved via a `/harness approve` comment under the daemon. Checklist of what to verify: ledger comment content, labels per status, control-table row, merged PR, ticked boxes, issue closed, and kill the daemon mid-run → `harness sync` → restart → no duplicate session, PR or comment.
+3. Migrating a repo off the gargi-orchestrator skill: stop the skill (archive Jules sessions), move/adopt the control issue, `harness init`, take the lock with `harness daemon`, never run both on one repo.
+4. Troubleshooting: lock held (`--force-unlock`), outbox failures (`harness status`), rate limits.
+
+## 9. Tests
+- `test_run_e2e.py` (the acceptance test): respx-mocked GitHub (`pytestmark = pytest.mark.respx(assert_all_called=True, assert_all_mocked=True)`, `GitHub(..., write_spacing=0.0)` with injected sleep/clock), `FakeAdapter.happy_path()` (PR #101), `FakeBackend` returning `approve` for the plan and PR reviews (PR review output with the right `head_sha` is produced by the executor), the built-in `plan-build-review` playbook, CI green check runs, a clean `pull_files`. Drive via typer's `CliRunner` with an injected app (a module-level factory the test monkeypatches) and a temp config: `harness run` → exits 0 at `needs-you` (merge gate) → `harness approve <issue>` → `harness run` again continues → merged. Assert the GitHub writes: ledger comment created then edited (no duplicates), `harness:*` labels per status, the merge PUT with the reviewed sha, branch DELETE, the issue body PATCH with ticked boxes, issue closed, event comments posted (run started, plan ready, PR ready, review verdicts, needs you, merged, done) and no comment on plain polls.
+- `test_lock.py`: acquire on an empty control issue creates the ledger lock; a second acquire from another host/pid raises `LockHeld`; a stale heartbeat is taken over; `force=True` takes over; release keeps other snapshot keys; token verification after write.
+- `test_daemon.py`: a second daemon refuses (exit 1 via CLI or `LockHeld` via `run_daemon`) while the first holds the lock; `--force-unlock` works; `stop` ends all loops and releases the lock; a failing periodic job is recorded and the daemon continues. Use short intervals and an injected clock; no real sleeps longer than a few ms.
+- `test_app.py`: `build_app` wiring with a temp config (Jules registered only when `JULES_API_KEY` is set; the key never appears in `repr(app)`), `default_registry` coverage test (§2).
+- No network, no real model, every test < 1s.
+
+## 10. Gates
+`uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest -q --durations=5` all pass; paste the raw output in the PR body. CI must be green before you report.
+
+## Do not add
+No web UI, no API server (M2), no new adapters, no parallel/worktree logic (M3), no changes to runner/executor semantics. If wiring reveals a real bug in a merged module, stop and report it with a minimal reproduction instead of patching around it.
