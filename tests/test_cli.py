@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from harness import config as config_module
 from harness.cli import app
 from harness.config import GlobalConfig, RepoConfig
 from harness.store.db import Store
@@ -15,7 +16,9 @@ runner = CliRunner()
 def temp_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
+    # CONFIG_HOME is read once at import, so the environment variable is too late: patch the module attribute.
     monkeypatch.setenv("GARGI_HARNESS_CONFIG", str(home / ".config" / "gargi-harness"))
+    monkeypatch.setattr(config_module, "CONFIG_HOME", home / ".config" / "gargi-harness")
     return home
 
 

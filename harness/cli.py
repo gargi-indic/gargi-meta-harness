@@ -1,24 +1,48 @@
 """CLI entrypoint for Gargi Harness."""
 
 import asyncio
+import json
+import os
+import re
+import signal
+import socket
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 import typer
 import yaml
 
 from harness import __version__
-from harness.adapters.base import AdapterRegistry
+from harness.app import App, build_app
 from harness.config import RepoConfig, RepoEntry, load_global, save_global
+from harness.daemon import run_daemon
 from harness.dag import blocked, ready_set
-from harness.engine import ExecutorRegistry, Runner
-from harness.github.client import GitHub
+from harness.engine import RunExists, Runner
+from harness.engine.model import TERMINAL_STATUSES
+from harness.github.client import GitHub, GitHubError
 from harness.github.commands import decide, default_retry_node, resolve_gate
 from harness.github.labels import ensure_harness_labels
-from harness.github.outbox import Outbox
-from harness.secrets import github_token, load_env_files
+from harness.lock import LockHeld
+from harness.playbook.load import PlaybookError, builtin_playbooks, load_playbook
+from harness.playbook.models import Playbook
+from harness.playbook.validate import validate
+from harness.secrets import github_token, load_env_files, redact
 from harness.store.db import Store
-from harness.store.repo import get_repo, get_run, list_issues, list_runs, pending_gates
+from harness.store.repo import (
+    IssueRow,
+    RunRow,
+    StepRow,
+    events_since,
+    get_gate,
+    get_issue,
+    get_repo,
+    get_run,
+    list_issues,
+    list_runs,
+    pending_gates,
+    steps_for_run,
+)
 from harness.sync import sync_repo
 
 app = typer.Typer(help="Gargi Harness CLI")
@@ -192,20 +216,6 @@ def _error_message(exc: Exception) -> str:
     return str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
 
 
-def _control_runner(store: Store) -> tuple[Runner, GitHub]:
-    """A runner for controls only: the outbox just enqueues (a daemon drains it), so no real token is needed."""
-    configs: dict[str, RepoConfig] = {}
-    for row in store.query("SELECT full_name FROM repos"):
-        stored = get_repo(store, row["full_name"])
-        try:
-            configs[row["full_name"]] = RepoConfig.model_validate((stored or {}).get("config") or {})
-        except ValueError:
-            continue  # an unreadable stored config falls back to the defaults
-    gh = GitHub(token="unused")
-    runner = Runner(store, Outbox(store, gh), ExecutorRegistry(), AdapterRegistry(), repo_configs=configs)
-    return runner, gh
-
-
 def _single_repo(repo: str | None) -> str | None:
     if repo:
         return repo
@@ -262,21 +272,22 @@ def reject(
 
 
 def _control(action: Callable[[Runner], Awaitable[str]]) -> None:
-    store = _open_store()
-    runner, gh = _control_runner(store)
+    """Run a control action. The outbox only enqueues here (a daemon drains it), so no real token is needed."""
+    cfg = load_global()
+    if not cfg.db_path.exists():
+        raise _fail("not synced: run harness sync")
+    application = build_app(cfg, gh=GitHub(token="unused"))
 
     async def _go() -> str:
         try:
-            return await action(runner)
+            return await action(application.runner)
         finally:
-            await gh.aclose()
+            await application.aclose()
 
     try:
         print(asyncio.run(_go()))
     except (KeyError, ValueError) as exc:
         raise _fail(_error_message(exc)) from None
-    finally:
-        store.close()
 
 
 @app.command()
@@ -327,6 +338,381 @@ def retry(run: str, node: str = typer.Argument(None, help="Node to retry (defaul
         return f"retry: {run} {target}"
 
     _control(action)
+
+
+# ---- run, daemon, runs, show -------------------------------------------------------------------------------
+
+_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_MAX_DELAY = 5.0
+_DRAIN_ATTEMPTS = 70
+_OUTPUT_CHARS = 200
+_LAST_EVENTS = 50
+
+
+def _epoch(value: str) -> float | None:
+    try:
+        return datetime.strptime(value, _TIME_FORMAT).replace(tzinfo=UTC).timestamp()
+    except ValueError:
+        return None
+
+
+def _label_value(labels: list[str], prefix: str) -> str | None:
+    for label in labels:
+        if label.startswith(prefix) and len(label) > len(prefix):
+            return label[len(prefix) :]
+    return None
+
+
+def _event_line(event: dict[str, Any]) -> str:
+    parts = []
+    for key, value in (event.get("data") or {}).items():
+        if value is None or not isinstance(value, str | int | float | bool):
+            continue
+        text = " ".join(str(value).split())
+        parts.append(f"{key}={text[:77] + '...' if len(text) > 80 else text}")
+    return redact(" ".join([str(event["ts"]), str(event["kind"]), *parts]))
+
+
+def _is_run_event(event: dict[str, Any], run: RunRow) -> bool:
+    """The run's own events, plus the issue's events that carry no run (for example ``outbox_failed``)."""
+    if event["run_id"] is not None:
+        return event["run_id"] == run.id
+    return event["repo"] == run.repo and event["issue"] == run.issue
+
+
+def _print_events(application: App, run_id: str, after: int) -> int:
+    """Print the new events of the run (one line each); returns the id of the last event seen."""
+    run = get_run(application.store, run_id)
+    last = after
+    for event in events_since(application.store, after):
+        last = max(last, event["id"])
+        if run is not None and _is_run_event(event, run):
+            print(_event_line(event))
+    return last
+
+
+def _last_event_id(application: App) -> int:
+    return application.store.query("SELECT COALESCE(MAX(id), 0) AS last FROM events")[0]["last"]
+
+
+def _next_delay(application: App, run_id: str) -> float:
+    """Seconds until the earliest step of the run is due, at most ``_MAX_DELAY``."""
+    now = application.clock()
+    delay = _MAX_DELAY
+    for step in steps_for_run(application.store, run_id):
+        if step.status == "pending":
+            return 0.0
+        if step.status == "waiting":
+            due = _epoch(step.poll_after) if step.poll_after else None
+            if due is None:
+                return 0.0
+            delay = min(delay, max(0.0, due - now))
+    return delay
+
+
+def _needs_you(step: StepRow) -> bool:
+    return step.status == "waiting" and bool(step.output and step.output.get("needs_you"))
+
+
+def _awaiting_resolution(application: App, run_id: str, baseline: dict[str, str | None]) -> bool:
+    """True while a decided gate has not been picked up by the runner yet (its step was not polled again)."""
+    for step in steps_for_run(application.store, run_id):
+        if not _needs_you(step):
+            continue
+        gate = get_gate(application.store, (step.output or {}).get("gate_id") or "")
+        if (
+            gate is not None
+            and gate.status != "pending"
+            and baseline.get(step.id, object()) == step.poll_after
+        ):
+            return True
+    return False
+
+
+def _print_needs_you(application: App, run_id: str) -> None:
+    for step in steps_for_run(application.store, run_id):
+        if not _needs_you(step):
+            continue
+        output = step.output or {}
+        print(f"needs you at {step.node_id}: {redact(' '.join(str(output.get('reason', '')).split()))}")
+        if output.get("gate_id"):
+            print(f"gate: {output['gate_id']}")
+        for link in output.get("links") or []:
+            print(f"link: {redact(str(link))}")
+
+
+async def _drain_all(application: App) -> None:
+    """Send everything that is due. Rate-limited rows wait (via the injected sleep) for the next window."""
+    for _ in range(_DRAIN_ATTEMPTS):
+        sent = await application.outbox.drain_once()
+        due = application.store.query(
+            "SELECT 1 FROM outbox WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?) LIMIT 1",
+            (application.store.now(),),
+        )
+        if not due:
+            return
+        if not sent:
+            await application.sleep(1.0)
+
+
+async def _resolve_playbook(
+    application: App, repo: str, playbook_id: str, ref: str | None
+) -> tuple[Playbook, str | None]:
+    """The repo's ``.harness/playbooks/<id>.yaml`` if it has one, else the built-in. Raises ValueError."""
+    if not _ID_RE.fullmatch(playbook_id):
+        raise ValueError(f"invalid playbook id {playbook_id!r}")
+    text = await application.gh.file_text(repo, f".harness/playbooks/{playbook_id}.yaml", ref=ref)
+    if text is not None:
+        try:
+            playbook = load_playbook(text)
+        except PlaybookError as exc:
+            raise ValueError(
+                f"playbook {playbook_id} of {repo} is invalid: {' '.join(str(exc).split())[:200]}"
+            ) from None
+    else:
+        found = builtin_playbooks().get(playbook_id)
+        if found is None:
+            raise ValueError(
+                f"unknown playbook {playbook_id!r}: not in {repo}/.harness/playbooks/ nor built in"
+            )
+        playbook = found
+    if not playbook.nodes:
+        raise ValueError(f"playbook {playbook_id} has no nodes")
+    problems = validate(playbook, agent_caps=application.adapters.caps_by_name())
+    if problems:
+        first = problems[0]
+        raise ValueError(f"playbook {playbook_id} is invalid: {first.path}: {first.code}: {first.message}")
+    known = set(application.runner.executors.kinds()) | {"join", "parallel"}
+    missing = sorted({n.kind for n in playbook.nodes.values()} - known)
+    if missing:
+        raise ValueError(f"playbook {playbook_id} uses node kinds without an executor: {', '.join(missing)}")
+    # The contents API's blob sha is not exposed by gh.file_text, so no playbook sha is recorded.
+    return playbook, None
+
+
+def _active_run(application: App, repo: str, number: int) -> RunRow | None:
+    for run in list_runs(application.store):
+        if run.repo == repo and run.issue == number and run.status not in TERMINAL_STATUSES:
+            return run
+    return None
+
+
+async def _start_or_continue(
+    application: App,
+    repo: str,
+    number: int,
+    playbook_flag: str | None,
+    agent_flag: str | None,
+    issue: IssueRow | None,
+) -> str:
+    """The id of the run to drive. Raises ValueError with a one-line message when it cannot be started."""
+    existing = _active_run(application, repo, number)
+    if existing is not None:
+        print(f"continuing {existing.id}")
+        return existing.id
+    if issue is None:
+        raise ValueError(f"issue #{number} not found in {repo}")
+    if issue.state != "open":
+        raise ValueError(f"issue #{number} is {issue.state}")
+    config = application.repo_configs.get(repo) or RepoConfig()
+    playbook_id = playbook_flag or _label_value(issue.labels, "playbook:") or config.default_playbook
+    agent = agent_flag or _label_value(issue.labels, "agent:") or config.default_agent
+    stored = get_repo(application.store, repo) or {}
+    playbook, sha = await _resolve_playbook(application, repo, playbook_id, stored.get("default_branch"))
+    if agent not in application.adapters.names():
+        known = ", ".join(application.adapters.names())
+        raise ValueError(f"agent {agent!r} is not available (known: {known}); is its API key set?")
+    try:
+        run_id = application.runner.start_run(repo, issue, playbook, playbook_sha=sha, agent=agent)
+    except RunExists as exc:
+        print(f"continuing {exc.run_id}")
+        return exc.run_id
+    print(f"started {run_id} ({playbook.id}, agent {agent})")
+    return run_id
+
+
+async def _drive(application: App, run_id: str, max_ticks: int | None, last_event: int) -> RunRow:
+    """Tick and drain in the foreground until the run is terminal, paused, waits for a human or ticks run out."""
+    store = application.store
+    baseline = {s.id: s.poll_after for s in steps_for_run(store, run_id) if s.status == "waiting"}
+    ticks = 0
+    while True:
+        await application.runner.tick()
+        ticks += 1
+        await application.outbox.drain_once()
+        last_event = _print_events(application, run_id, last_event)
+        run = get_run(store, run_id)
+        assert run is not None
+        if run.status in TERMINAL_STATUSES or run.status == "paused":
+            break
+        if run.status == "needs-you" and not _awaiting_resolution(application, run_id, baseline):
+            break
+        if max_ticks is not None and ticks >= max_ticks:
+            print(f"stopped after {ticks} ticks; run continues with: harness run")
+            break
+        await application.sleep(_next_delay(application, run_id))
+    await _drain_all(application)
+    _print_events(application, run_id, last_event)
+    run = get_run(store, run_id)
+    assert run is not None
+    return run
+
+
+async def _run_command(
+    application: App,
+    repo: str,
+    number: int,
+    playbook_flag: str | None,
+    agent_flag: str | None,
+    max_ticks: int | None,
+) -> int:
+    try:
+        report = await sync_repo(application.gh, application.store, repo)
+        application.set_repo_config(repo, report.config)
+        for error in report.errors:
+            print(f"warning: {redact(error)}")
+        issue = get_issue(application.store, repo, number)
+        last_event = _last_event_id(application)
+        run_id = await _start_or_continue(application, repo, number, playbook_flag, agent_flag, issue)
+        run = await _drive(application, run_id, max_ticks, last_event)
+        if run.status == "needs-you":
+            _print_needs_you(application, run_id)
+        elif run.status == "paused":
+            print(f"paused: harness resume {run_id}")
+        print(f"run {run_id}: {run.status}")
+        return 1 if run.status in ("failed", "cancelled") else 0
+    except (ValueError, GitHubError) as exc:
+        print(f"error: {redact(str(exc))}")
+        return 1
+    finally:
+        await application.aclose()
+
+
+def _build(**kwargs: Any) -> App:
+    try:
+        return build_app(load_global(), **kwargs)
+    except RuntimeError as exc:
+        raise _fail(f"error: {redact(str(exc))}") from None
+
+
+@app.command()
+def run(
+    repo: str = typer.Argument(..., help="owner/repo"),
+    issue: int = typer.Argument(..., help="Issue number."),
+    playbook: str = typer.Option(None, "--playbook", help="Playbook id (default: label, then repo default)."),
+    agent: str = typer.Option(None, "--agent", help="Agent name (default: label, then repo default)."),
+    max_ticks: int = typer.Option(None, "--max-ticks", min=1, help="Stop after this many ticks."),
+) -> None:
+    """Start (or continue) a run for an issue and drive it in the foreground."""
+    application = _build()
+    raise typer.Exit(asyncio.run(_run_command(application, repo, issue, playbook, agent, max_ticks)))
+
+
+@app.command()
+def daemon(
+    force_unlock: bool = typer.Option(False, "--force-unlock", help="Take the run lock even if it is held."),
+) -> None:
+    """Run the runner, outbox, command polling and sync for all registered repos."""
+    cfg = load_global()
+    if not cfg.repos:
+        raise _fail("no repos registered: run harness init <owner/repo>")
+    application = _build()
+    host, pid = socket.gethostname(), os.getpid()
+
+    async def _main() -> None:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        installed: list[signal.Signals] = []
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+                installed.append(sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+        print(f"daemon {host}:{pid} for {', '.join(r.name for r in cfg.repos)}: Ctrl-C to stop")
+        try:
+            await run_daemon(application, stop, host=host, pid=pid, force_unlock=force_unlock)
+        finally:
+            for sig in installed:
+                loop.remove_signal_handler(sig)
+
+    try:
+        asyncio.run(_main())
+    except LockHeld as exc:
+        raise _fail(f"{exc}; stop that orchestrator, or use --force-unlock") from None
+    print("daemon stopped")
+
+
+@app.command()
+def runs(
+    repo: str = typer.Option(None, "--repo", help="Only runs of this repo."),
+    status: str = typer.Option(None, "--status", help="Only runs with this status."),
+) -> None:
+    """List runs."""
+    store = _open_store()
+    try:
+        print(f"{'RUN':<28} {'ISSUE':<7} {'PLAYBOOK':<22} {'STATUS':<10} {'ACTIVE':<24} PR")
+        for item in list_runs(store, status):
+            if repo and item.repo != repo:
+                continue
+            active = ",".join(
+                s.node_id
+                for s in steps_for_run(store, item.id)
+                if s.status in ("pending", "running", "waiting")
+            )
+            pr = item.context.get("pr")
+            pr_text = f"#{pr['number']}" if isinstance(pr, dict) and "number" in pr else "-"
+            print(
+                f"{item.id:<28} {'#' + str(item.issue):<7} {item.playbook_id:<22} {item.status:<10} "
+                f"{active or '-':<24} {pr_text}"
+            )
+    finally:
+        store.close()
+
+
+def _output_summary(output: dict[str, Any] | None) -> str:
+    if not output:
+        return ""
+    return redact(json.dumps(output, sort_keys=True, ensure_ascii=False, default=str))[:_OUTPUT_CHARS]
+
+
+@app.command()
+def show(run: str = typer.Argument(..., help="Run id, for example owner/repo#7@1.")) -> None:
+    """Show a run: its fields, steps and last events."""
+    store = _open_store()
+    try:
+        item = get_run(store, run)
+        if item is None:
+            raise _fail(f"run {run} not found")
+        pr = item.context.get("pr")
+        print(f"run: {item.id}")
+        print(f"repo: {item.repo}  issue: #{item.issue}  status: {item.status}")
+        print(
+            f"playbook: {item.playbook_id}  sha: {item.playbook_sha or '-'}  agent: {item.context.get('agent') or '-'}"
+        )
+        print(
+            f"pr: {redact(str(pr.get('url') or '#' + str(pr['number']))) if isinstance(pr, dict) and 'number' in pr else '-'}"
+        )
+        print(f"created: {item.created_at}  updated: {item.updated_at}")
+        print("steps:")
+        print(f"  {'NODE':<14} {'VISIT':<6} {'STATUS':<9} {'OUTCOME':<10} OUTPUT")
+        for step in steps_for_run(store, item.id):
+            print(
+                f"  {step.node_id:<14} {step.visit:<6} {step.status:<9} {step.outcome or '-':<10} "
+                f"{_output_summary(step.output)}"
+            )
+        print(f"events (last {_LAST_EVENTS}):")
+        rows = store.query(
+            "SELECT * FROM events WHERE run_id = ? OR (run_id IS NULL AND repo = ? AND issue = ?) "
+            "ORDER BY id DESC LIMIT ?",
+            (item.id, item.repo, item.issue, _LAST_EVENTS),
+        )
+        for row in reversed(rows):
+            row["data"] = json.loads(row["data_json"]) if row["data_json"] else {}
+            print(f"  {_event_line(row)}")
+    finally:
+        store.close()
 
 
 playbook_app = typer.Typer(help="Playbook commands")
