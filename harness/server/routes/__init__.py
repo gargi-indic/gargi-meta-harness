@@ -1,0 +1,9 @@
+"""Read-only API routers, registered in ``create_app`` before the static catch-all."""
+
+from fastapi import APIRouter
+
+from harness.server.routes import board, campaigns, inbox, runs
+
+
+def api_routers() -> list[APIRouter]:
+    return [campaigns.router, board.router, inbox.router, runs.router]

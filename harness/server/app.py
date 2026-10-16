@@ -1,4 +1,4 @@
-"""App factory for the local web server: auth, health, SSE and static serving. No domain routes yet."""
+"""App factory for the local web server: auth, health, SSE, the read-only API and static serving."""
 
 import asyncio
 import contextlib
@@ -15,6 +15,7 @@ from harness.config import GlobalConfig
 from harness.server.auth import COOKIE, TokenGuard, generate_token, token_matches
 from harness.server.deps import get_bus, get_config
 from harness.server.events import EventBus, EventLogTailer, parse_last_event_id, sse_stream
+from harness.server.routes import api_routers
 from harness.server.static import register_static
 from harness.store.db import Store
 
@@ -51,7 +52,7 @@ def create_app(
                     await task
             bus.close()
 
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url="/api/openapi.json", lifespan=lifespan)
     app.state.store = store
     app.state.config = config
     app.state.bus = bus
@@ -81,6 +82,9 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    for router in api_routers():
+        app.include_router(router)
 
     @app.api_route("/api", methods=_ALL_METHODS, include_in_schema=False)
     @app.api_route("/api/{rest:path}", methods=_ALL_METHODS, include_in_schema=False)

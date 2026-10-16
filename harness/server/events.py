@@ -1,4 +1,17 @@
-"""In-process SSE event bus, the wire format, and the tailer that feeds it from the SQLite event log."""
+"""In-process SSE event bus, the wire format, and the tailer that feeds it from the SQLite event log.
+
+SSE event types (the ``event:`` field on the wire). Every payload is
+``{id, ts, repo, issue, run_id, kind, data}``: the event-log row, redacted.
+
+- ``run.updated``: a run started or changed status (pause, resume, retry, done, failed, cancelled, needs-you).
+- ``step.updated``: a step changed (waiting, done) or the engine hit a step-level problem.
+- ``activity``: the agent reported an activity item; fetch it from ``/api/runs/{id}/activity``.
+- ``inbox.changed``: the set of items that need the human may have changed; refetch ``/api/inbox``.
+- ``issue.updated``: an issue's derived status or run may have changed; refetch board or graph.
+- ``log``: any other event-log row (daemon, sync and engine diagnostics).
+
+One event-log row publishes one bus event per mapped type, in the order of ``KIND_TO_TYPES``.
+"""
 
 import asyncio
 import json
@@ -17,6 +30,50 @@ from harness.store.repo import events_since
 log = logging.getLogger(__name__)
 
 _PAGE = 500
+
+EVT_RUN_UPDATED = "run.updated"
+EVT_STEP_UPDATED = "step.updated"
+EVT_ACTIVITY = "activity"
+EVT_INBOX_CHANGED = "inbox.changed"
+EVT_ISSUE_UPDATED = "issue.updated"
+EVT_LOG = "log"
+
+_RUN = (EVT_RUN_UPDATED, EVT_ISSUE_UPDATED)
+_RUN_ATTENTION = (EVT_RUN_UPDATED, EVT_ISSUE_UPDATED, EVT_INBOX_CHANGED)
+
+# Event-log ``kind`` to the SSE types it publishes. Any kind not listed publishes a single ``log`` event.
+KIND_TO_TYPES: dict[str, tuple[str, ...]] = {
+    "run_started": _RUN,
+    "run_running": _RUN,
+    "run_paused": _RUN,
+    "run_needs-you": _RUN_ATTENTION,
+    "run_done": _RUN_ATTENTION,
+    "run_failed": _RUN_ATTENTION,
+    "run_cancelled": _RUN_ATTENTION,
+    "paused": _RUN,
+    "resumed": _RUN,
+    "retry": _RUN,
+    "cancel_error": _RUN,
+    "step_waiting": (EVT_STEP_UPDATED, EVT_INBOX_CHANGED),
+    "step_done": (EVT_STEP_UPDATED, EVT_INBOX_CHANGED),
+    "executor_error": (EVT_STEP_UPDATED,),
+    "exhausted": (EVT_STEP_UPDATED,),
+    "no_route": (EVT_STEP_UPDATED,),
+    "unknown_node": (EVT_STEP_UPDATED,),
+    "routing_loop": (EVT_STEP_UPDATED,),
+    "needs_you": (EVT_INBOX_CHANGED, EVT_STEP_UPDATED),
+    "agent_activity": (EVT_ACTIVITY,),
+}
+
+
+def types_for_kind(kind: str) -> tuple[str, ...]:
+    """The SSE types an event-log kind publishes; ``run_<other status>`` behaves like ``run_running``."""
+    mapped = KIND_TO_TYPES.get(kind)
+    if mapped is not None:
+        return mapped
+    if kind.startswith("run_"):
+        return _RUN
+    return (EVT_LOG,)
 
 
 class ServerEvent(BaseModel):
@@ -168,7 +225,9 @@ class EventLogTailer:
         try:
             payload = {key: row[key] for key in ("id", "ts", "repo", "issue", "run_id", "kind")}
             payload["data"] = row["data"]
-            self._bus.publish(row["kind"], _redact_value(payload))
+            redacted = _redact_value(payload)
+            for event_type in types_for_kind(str(row["kind"])):
+                self._bus.publish(event_type, redacted)
         except Exception as exc:
             log.warning(
                 "event %s skipped, it could not be published: %s",
@@ -181,7 +240,10 @@ class EventLogTailer:
         return True
 
     async def poll_once(self) -> int:
-        """Publish the rows after the last one seen; returns how many. A failure is logged and retried."""
+        """Publish the rows after the last one seen; returns how many rows (not bus events).
+
+        A failure is logged and retried.
+        """
         published = 0
         try:
             while True:
