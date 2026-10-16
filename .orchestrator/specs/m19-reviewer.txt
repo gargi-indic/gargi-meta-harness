@@ -55,7 +55,7 @@ class ClaudeSdkBackend:
   - `target: question`: `question = (prev or {}).get("question")`; none → escalate.
 - Checklists, for each name in `node.checklist`: `.harness/checklists/<name>.md` from `ctx.gh.file_text(repo, path)` (repo version wins) else the built-in; neither → skip it and `append_event(kind="checklist_missing", data={"name"})`.
 - Everything inserted into prompts passes through `redact`.
-- Output = `{"verdict", "findings": [f.model_dump()...], "correction", "summary"}`; outcome = verdict (`Done(verdict, output)`). `correction` is the field `revise` nodes use.
+- Output = `{"verdict", "findings": [f.model_dump()...], "correction", "summary"}`, plus `"head_sha"` for `target: pr` (from `(await ctx.gh.pull(repo, number))["head"]["sha"]`, read BEFORE `pull_files`; the merged merge executor (#20) refuses to merge when a PR review's `head_sha` differs from the current head); outcome = verdict (`Done(verdict, output)`). `correction` is the field `revise` nodes use.
 - After a `pr` review, when `ctx.outbox` is set: enqueue `add_comment` on the PR number with `coalesce_key=f"review:{step.id}"`; body (redacted): `**Harness review: <verdict>**`, the summary, a findings table (severity | file | problem | required change), and, if non-empty, `### Required changes` + the correction. (Not `--request-changes`: it fails on PRs opened under the user's own account.) No PR comment for `plan`/`question` targets.
 - `workdir` passed to the backend: `None` in M1 (a PR-head worktree is M3); the `pr` prompt therefore must contain the diff itself.
 
