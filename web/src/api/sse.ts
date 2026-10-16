@@ -13,7 +13,10 @@ export function useEventStream(
   types: readonly string[] = EVENT_TYPES
 ) {
   const handlerRef = useRef(handler);
-  handlerRef.current = handler;
+
+  useEffect(() => {
+    handlerRef.current = handler;
+  }, [handler]);
 
   // Store types so we don't trigger effect on every render
   const typesRef = useRef(types);

@@ -1,21 +1,43 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
-import { globSync } from 'glob';
 
 describe('Design Rules', () => {
   const root = join(__dirname, '../');
 
-  function getFiles(pattern: string) {
-    return globSync(pattern, { cwd: root, ignore: ['generated/**', 'styles/tokens.css', '**/*.test.tsx', '**/*.test.ts'] });
+  function getFiles(dir: string, pattern: RegExp): string[] {
+    let results: string[] = [];
+    const list = readdirSync(dir);
+    list.forEach(file => {
+      file = join(dir, file);
+      if (file.includes('/generated/') || file.includes('/styles/tokens.css')) {
+        return;
+      }
+      const stat = statSync(file);
+      if (stat && stat.isDirectory()) {
+        results = results.concat(getFiles(file, pattern));
+      } else if (pattern.test(file)) {
+        if (!file.endsWith('.test.tsx') && !file.endsWith('.test.ts')) {
+          results.push(file);
+        }
+      }
+    });
+    return results;
+  }
+
+  function stripCssComments(content: string) {
+    return content.replace(/\/\*[\s\S]*?\*\//g, '');
   }
 
   it('no hex color literals exist outside tokens.css', () => {
-    const files = getFiles('**/*.{ts,tsx,css}');
+    const files = getFiles(root, /\.(ts|tsx|css)$/);
     const hexRegex = /#[0-9a-fA-F]{3,8}\b/;
 
     for (const file of files) {
-      const content = readFileSync(join(root, file), 'utf-8');
+      let content = readFileSync(file, 'utf-8');
+      if (file.endsWith('.css')) {
+        content = stripCssComments(content);
+      }
       const lines = content.split('\n');
       lines.forEach((line, i) => {
         if (hexRegex.test(line)) {
@@ -25,35 +47,57 @@ describe('Design Rules', () => {
     }
   });
 
-  it('border-radius is never set to a non-zero value and no box-shadow/gradients', () => {
-    const cssFiles = getFiles('**/*.css');
+  it('border-radius is never set to a non-zero value and no box-shadow/gradients in CSS', () => {
+    const cssFiles = getFiles(root, /\.css$/);
 
     for (const file of cssFiles) {
-      const content = readFileSync(join(root, file), 'utf-8');
-
+      const content = stripCssComments(readFileSync(file, 'utf-8'));
       const lines = content.split('\n');
+
       lines.forEach((line, i) => {
-        // match border-radius setting something other than 0
-        const brMatch = line.match(/border-radius:\s*([^;]+);/);
-        if (brMatch) {
-          const val = brMatch[1].trim();
-          if (val !== '0') {
+        const matches = line.matchAll(/(?:^|[\s;{])(?:border-[a-z-]*)?radius\s*:\s*([^;}]+)/g);
+        for (const match of matches) {
+          const val = match[1].trim();
+          if (!/^0(px)?$/.test(val)) {
             throw new Error(`Non-zero border-radius in ${file}:${i + 1}\n  ${line.trim()}`);
           }
         }
 
-        if (line.includes('box-shadow:')) {
-          throw new Error(`box-shadow found in ${file}:${i + 1}\n  ${line.trim()}`);
+        if (/(box|text)-shadow\s*:/.test(line)) {
+          throw new Error(`shadow found in ${file}:${i + 1}\n  ${line.trim()}`);
         }
-        if (line.includes('linear-gradient(') || line.includes('radial-gradient(')) {
+        if (/drop-shadow\(/.test(line)) {
+          throw new Error(`drop-shadow found in ${file}:${i + 1}\n  ${line.trim()}`);
+        }
+        if (/-gradient\s*\(/.test(line)) {
           throw new Error(`Gradient found in ${file}:${i + 1}\n  ${line.trim()}`);
         }
       });
     }
   });
 
+  it('no border-radius, box-shadow or gradients in TS/TSX', () => {
+    const tsFiles = getFiles(root, /\.(ts|tsx)$/);
+    for (const file of tsFiles) {
+      const content = readFileSync(file, 'utf-8');
+      const lines = content.split('\n');
+
+      lines.forEach((line, i) => {
+        if (line.includes('borderRadius')) {
+          throw new Error(`borderRadius found in ${file}:${i + 1}\n  ${line.trim()}`);
+        }
+        if (line.includes('boxShadow')) {
+          throw new Error(`boxShadow found in ${file}:${i + 1}\n  ${line.trim()}`);
+        }
+        if (line.includes('gradient(')) {
+          throw new Error(`gradient found in ${file}:${i + 1}\n  ${line.trim()}`);
+        }
+      });
+    }
+  });
+
   it('tokens.css matches docs/design/tokens.css byte for byte', () => {
-    const originalTokensPath = join(root, '../../docs/design/tokens.css');
+    const originalTokensPath = join(__dirname, '../../../docs/design/tokens.css');
     const localTokensPath = join(root, 'styles/tokens.css');
 
     const originalTokens = readFileSync(originalTokensPath, 'utf-8');

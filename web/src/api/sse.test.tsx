@@ -35,7 +35,7 @@ describe('useEventStream', () => {
 
   beforeEach(() => {
     fakeEs = null;
-    esConstructorMock = vi.fn().mockImplementation((url) => {
+    esConstructorMock = vi.fn(function(this: any, url: string) {
       fakeEs = new FakeEventSource(url);
       return fakeEs;
     });
@@ -45,11 +45,11 @@ describe('useEventStream', () => {
   it('calls handler with parsed data and seq', () => {
     const handlerProp = vi.fn();
 
-    // Passing a fresh array instance `['test.event']` every render used to trigger re-renders if we don't handle dependency array well.
-    // By passing an empty dependency array in `useEventStream`, we avoid it.
+    // Use constant array so reference doesn't change causing useEffect to rerun
+    const TYPES = ['test.event'];
 
     function TestComponent({ h }: { h: any }) {
-      useEventStream(h, ['test.event']);
+      useEventStream(h, TYPES);
       return <div />;
     }
 
@@ -68,10 +68,7 @@ describe('useEventStream', () => {
     const newHandler = vi.fn();
     esConstructorMock.mockClear();
 
-    // Rerender with a new handler
     rerender(<TestComponent h={newHandler} />);
-
-    // Changing handler should not reconnect (new EventSource)
     expect(esConstructorMock).not.toHaveBeenCalled();
 
     fakeEs?.emit('test.event', { lastEventId: '43', data: JSON.stringify({ again: true }) });
@@ -79,6 +76,14 @@ describe('useEventStream', () => {
       seq: 43,
       type: 'test.event',
       data: { again: true }
+    });
+
+    // Also test default listener on 'message' event and close on unmount
+    fakeEs?.emit('message', { lastEventId: '44', data: JSON.stringify({ generic: 'msg' }) });
+    expect(newHandler).toHaveBeenCalledWith({
+      seq: 44,
+      type: 'message',
+      data: { generic: 'msg' }
     });
 
     unmount();

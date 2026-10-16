@@ -180,6 +180,8 @@ tr {
 }
 
 .header-inner {
+  max-width: 1240px;
+  margin: 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -210,6 +212,7 @@ tr {
 }
 
 .menu-btn {
+  min-height: 44px;
   display: none;
   background: transparent;
   border: none;
@@ -220,10 +223,13 @@ tr {
 
 @media (max-width: 859px) {
   .header-inner {
+  max-width: 1240px;
+  margin: 0 auto;
     padding: 0 16px;
   }
 
   .menu-btn {
+  min-height: 44px;
     display: block;
   }
 
@@ -243,4 +249,12 @@ tr {
   .header nav[data-open="true"] {
     display: flex;
   }
+}
+
+.mt-16 {
+  margin-top: 16px;
+}
+
+.header nav a:hover {
+  color: var(--accent);
 }

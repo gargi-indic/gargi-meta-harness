@@ -27,10 +27,16 @@ describe('api client', () => {
       statusText: 'Unauthorized',
       json: async () => ({ detail: 'unauthorized' })
     };
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any);
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse as any);
 
-    await expect(apiGet('/test')).rejects.toThrowError(ApiError);
-    await expect(apiGet('/test').catch(e => e.detail)).resolves.toBe('unauthorized');
+    try {
+      await apiGet('/test');
+      expect.fail('Should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(401);
+      expect(err.detail).toBe('unauthorized');
+    }
   });
 
   it('apiGet throws ApiError using statusText when not json', async () => {
@@ -40,10 +46,16 @@ describe('api client', () => {
       statusText: 'Internal Server Error',
       json: async () => { throw new Error('Not JSON'); }
     };
-    vi.mocked(fetch).mockResolvedValue(mockResponse as any);
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse as any);
 
-    await expect(apiGet('/test')).rejects.toThrowError(ApiError);
-    await expect(apiGet('/test').catch(e => e.detail)).resolves.toBe('Internal Server Error');
+    try {
+      await apiGet('/test');
+      expect.fail('Should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(500);
+      expect(err.detail).toBe('Internal Server Error');
+    }
   });
 
   it('apiPost sends JSON and credentials', async () => {
