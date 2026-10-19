@@ -1,5 +1,9 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
+import React, { Suspense } from 'react';
 import { Page } from './Page';
+
+// Lazy load DevCanvasPage so it can be tree-shaken in prod
+const DevCanvasPage = import.meta.env.DEV ? React.lazy(() => import('../canvas/DevCanvasPage')) : null;
 
 export function AppRoutes() {
   return (
@@ -10,6 +14,15 @@ export function AppRoutes() {
       <Route path="/inbox" element={<Page title="Inbox" />} />
       <Route path="/runs" element={<Page title="Runs" />} />
       <Route path="/playbooks" element={<Page title="Playbooks" />} />
+
+      {import.meta.env.DEV && DevCanvasPage && (
+        <Route path="/dev/canvas" element={
+          <Suspense fallback={<div>Loading canvas...</div>}>
+            <DevCanvasPage />
+          </Suspense>
+        } />
+      )}
+
       <Route path="*" element={<Page title="Not found" />} />
     </Routes>
   );

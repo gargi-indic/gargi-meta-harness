@@ -8,7 +8,7 @@ export interface PanelProps {
 export function Panel({ title, children }: PanelProps) {
   return (
     <section className="panel">
-      {title && <h2 className="panel-title">{title}</h2>}
+      {title != null && title !== false && <h2 className="panel-title">{title}</h2>}
       <div>{children}</div>
     </section>
   );

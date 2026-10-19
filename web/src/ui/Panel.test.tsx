@@ -1,8 +1,12 @@
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, cleanup } from '@testing-library/react';
+import { describe, it, expect, afterEach } from 'vitest';
 import { Panel } from './Panel';
 
 describe('Panel', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   it('renders content and title', () => {
     render(<Panel title="My Panel">Content</Panel>);
     expect(screen.getByRole('heading', { name: 'My Panel' })).toBeInTheDocument();
