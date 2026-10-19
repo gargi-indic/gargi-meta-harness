@@ -1,0 +1,253 @@
+[
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "agent",
+      "session": "main",
+      "action": "plan",
+      "agent": "x",
+      "expect": null,
+      "message": null,
+      "prompt": null,
+      "timeout": null
+    },
+    "ports": [
+      "plan_ready",
+      "pr_ready",
+      "needs_input",
+      "failed",
+      "timeout"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": 3,
+      "kind": "agent",
+      "session": "main",
+      "action": "plan",
+      "agent": "x",
+      "expect": null,
+      "message": null,
+      "prompt": null,
+      "timeout": null
+    },
+    "ports": [
+      "plan_ready",
+      "pr_ready",
+      "needs_input",
+      "failed",
+      "timeout",
+      "exhausted"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "agent",
+      "session": "main",
+      "action": "implement",
+      "agent": "{{ issue.agent }}",
+      "expect": null,
+      "message": null,
+      "prompt": null,
+      "timeout": null
+    },
+    "ports": [
+      "pr_ready",
+      "needs_input",
+      "failed",
+      "timeout"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "agent",
+      "session": "main",
+      "action": "revise",
+      "agent": "{{ issue.agent }}",
+      "expect": "plan",
+      "message": null,
+      "prompt": null,
+      "timeout": null
+    },
+    "ports": [
+      "plan_ready",
+      "needs_input",
+      "failed",
+      "timeout"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": 2,
+      "kind": "agent",
+      "session": "main",
+      "action": "revise",
+      "agent": "{{ issue.agent }}",
+      "expect": "pr",
+      "message": null,
+      "prompt": null,
+      "timeout": null
+    },
+    "ports": [
+      "pr_ready",
+      "needs_input",
+      "failed",
+      "timeout",
+      "exhausted"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "review",
+      "target": "plan",
+      "checklist": []
+    },
+    "ports": [
+      "approve",
+      "changes",
+      "escalate"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": 1,
+      "kind": "review",
+      "target": "pr",
+      "checklist": [
+        "a"
+      ]
+    },
+    "ports": [
+      "approve",
+      "changes",
+      "escalate",
+      "exhausted"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "check",
+      "check": "ci",
+      "command": null
+    },
+    "ports": [
+      "pass",
+      "fail"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "gate",
+      "gate": "test"
+    },
+    "ports": [
+      "approved",
+      "rejected"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "branch",
+      "cases": [
+        {
+          "when": "a",
+          "port": "a"
+        },
+        {
+          "when": "b",
+          "port": "b"
+        }
+      ],
+      "default": "c"
+    },
+    "ports": [
+      "a",
+      "b",
+      "c"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "parallel",
+      "branches": [
+        "a"
+      ]
+    },
+    "ports": []
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "join",
+      "mode": "all",
+      "inputs": null
+    },
+    "ports": [
+      "done",
+      "failed"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "decompose"
+    },
+    "ports": [
+      "created",
+      "failed"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "merge",
+      "method": null
+    },
+    "ports": [
+      "merged",
+      "failed"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "escalate"
+    },
+    "ports": [
+      "resolved"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
+      "kind": "notify",
+      "message": "test"
+    },
+    "ports": [
+      "sent"
+    ]
+  }
+]

@@ -1,0 +1,125 @@
+.node-card {
+  box-sizing: border-box;
+  background-color: var(--paper);
+  border: 2px solid var(--faint);
+  border-radius: 0;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  width: 200px;
+  min-height: 72px;
+}
+
+.node-card--terminal {
+  width: 96px;
+  min-height: 40px;
+  justify-content: center;
+  align-items: center;
+  padding: 4px;
+}
+
+.node-card--running { border-color: var(--accent); }
+.node-card--done { border-color: var(--ink); }
+.node-card--failed {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  color: var(--on-accent);
+}
+.node-card--waiting {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+.node-card--pending {
+  border-color: var(--faint);
+  color: var(--faint);
+}
+
+.node-card--selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.node-card-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.node-card-id, .node-card-badge {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.node-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.node-card-kind {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.node-card-label {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.node-card-status {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.node-handle {
+  width: 8px;
+  height: 8px;
+  border-radius: 0;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+}
+
+.node-card--failed .node-handle {
+  border-color: var(--on-accent);
+  background: var(--accent);
+}
+
+.node-port {
+  position: absolute;
+  right: -6px;
+  display: flex;
+  align-items: center;
+}
+
+.node-port-label {
+  position: absolute;
+  right: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--paper);
+  padding: 0 2px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.node-card--failed .node-port-label {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.react-flow__node {
+  border-radius: 0 !important;
+}
+
+.custom-edge-label {
+  background-color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--line-soft);
+}
