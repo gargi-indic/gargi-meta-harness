@@ -167,3 +167,39 @@ export interface ControlRequestOut {
   created_at: string;
   handled_at: string | null;
 }
+
+export interface ValidateIssue {
+  severity: 'error' | 'warn';
+  code: string;
+  message: string;
+  node?: string;
+  port?: string;
+  path?: string;
+}
+
+export interface ValidateResponse {
+  ok: boolean;
+  issues: ValidateIssue[];
+}
+
+export interface TraceStep {
+  node: string;
+  visit: number;
+  outcome?: string;
+}
+
+export interface DryRunResponse {
+  terminated: string;
+  trace: TraceStep[];
+  gates_auto_resolved?: string[];
+  error?: string | null;
+}
+
+export interface SaveResponse {
+  pr?: {
+    number: number;
+    url: string;
+  };
+  branch: string;
+  existing: boolean;
+}
