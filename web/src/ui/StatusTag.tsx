@@ -11,14 +11,44 @@ export const TONE_COLOR: Record<Tone, "--accent" | "--ink" | "--muted"> = {
 };
 
 export interface StatusTagProps {
-  tone: Tone;
-  children: ReactNode;
+  status?: string;
+  tone?: Tone;
+  children?: ReactNode;
 }
 
-export function StatusTag({ tone, children }: StatusTagProps) {
+export function StatusTag({ status, tone, children }: StatusTagProps) {
+  let resolvedTone: Tone = tone || "muted";
+  const content = children || status || "unknown";
+
+  if (status) {
+    switch (status.toLowerCase()) {
+      case "running":
+        resolvedTone = "live";
+        break;
+      case "needs-you":
+        resolvedTone = "live";
+        break;
+      case "failed":
+        resolvedTone = "fail";
+        break;
+      case "done":
+        resolvedTone = "ok";
+        break;
+      case "waiting":
+      case "pending":
+      case "skipped":
+      case "paused":
+        resolvedTone = "muted";
+        break;
+      default:
+        resolvedTone = "muted";
+        break;
+    }
+  }
+
   return (
-    <span className={`tag tag--${tone}`}>
-      {children}
+    <span className={`tag tag--${resolvedTone}`}>
+      {content}
     </span>
   );
 }
