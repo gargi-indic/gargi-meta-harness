@@ -1,0 +1,49 @@
+.run-page-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 24px;
+  height: 100%;
+}
+
+@media (max-width: 860px) {
+  .run-page-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.activity-stream {
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid var(--line-soft);
+  padding: 8px;
+}
+
+.activity-row {
+  opacity: 0;
+  animation: fade-in 150ms forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-row {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.run-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.inline-confirm {
+  color: var(--accent);
+  margin-left: 8px;
+  font-size: 14px;
+}

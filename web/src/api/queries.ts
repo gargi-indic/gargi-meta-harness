@@ -107,3 +107,47 @@ export function useEnabledAgents(repo: string) {
     enabled: !!repo,
   });
 }
+
+export function useRuns(status?: string, issue?: number, repo?: string) {
+  return useQuery<import('./types').RunSummary[]>({
+    queryKey: [...queryKeys.runs, { status, issue, repo }],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (status) params.set('status', status);
+      if (issue !== undefined) params.set('issue', issue.toString());
+      if (repo) params.set('repo', repo);
+      const query = params.toString();
+      return apiGet(`/api/runs${query ? `?${query}` : ''}`);
+    },
+  });
+}
+
+export function useRun(id: string) {
+  return useQuery<import('./types').RunDetail>({
+    queryKey: queryKeys.run(id),
+    queryFn: () => apiGet(`/api/runs/${encodeURIComponent(id)}`),
+    enabled: !!id,
+  });
+}
+
+export function useControlRequest(id: number | null) {
+  return useQuery<import('./types').ControlRequestOut>({
+    queryKey: ['control-request', id],
+    queryFn: () => apiGet(`/api/control-requests/${id}`),
+    enabled: id !== null,
+    refetchInterval: (query) => {
+      if (query.state.data && query.state.data.handled_at !== null) {
+        return false;
+      }
+      return 1000; // poll every second until handled
+    },
+  });
+}
+
+export function useRunActivity(id: string, after: number = 0, limit: number = 200) {
+  return useQuery<import('./types').ActivityPage>({
+    queryKey: ['runs', id, 'activity', { after, limit }],
+    queryFn: () => apiGet(`/api/runs/${encodeURIComponent(id)}/activity?after=${after}&limit=${limit}`),
+    enabled: !!id,
+  });
+}

@@ -111,3 +111,59 @@ export interface AgentConfigOut {
 export interface AgentsEnabled {
   agents: AgentConfigOut[];
 }
+
+export interface RunSummary {
+  id: string;
+  repo: string;
+  issue: number;
+  title: string;
+  playbook_id: string;
+  status: string;
+  agent: string | null;
+  pr: number | null;
+  current_node: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StepOut {
+  id: string;
+  node: string;
+  visit: number;
+  status: string;
+  outcome: string | null;
+  ref: Record<string, unknown> | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface RunDetail {
+  run: RunSummary;
+  playbook: Record<string, unknown> | null;
+  steps: StepOut[];
+  visit_counts: Record<string, number>;
+}
+
+export interface ActivityItem {
+  seq: number;
+  ts: string | null;
+  step_id: string | null;
+  kind: string;
+  text: string;
+}
+
+export interface ActivityPage {
+  items: ActivityItem[];
+  next: number;
+}
+
+export interface ControlRequestOut {
+  id: number;
+  run_id: string;
+  step_id: string | null;
+  kind: string;
+  status: string;
+  result: Record<string, unknown> | null;
+  created_at: string;
+  handled_at: string | null;
+}

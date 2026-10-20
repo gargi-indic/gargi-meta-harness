@@ -1,8 +1,10 @@
-export function Page({ title }: { title: string }) {
+import { ReactNode } from 'react';
+
+export function Page({ title, children }: { title: string, children?: ReactNode }) {
   return (
     <div className="container">
       <h1>{title}</h1>
-      <p className="empty mt-16">Not built yet.</p>
+      {children || <p className="empty mt-16">Not built yet.</p>}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-export const EVENT_TYPES = ["run.updated", "step.updated", "inbox.changed", "issue.updated"] as const;
+export const EVENT_TYPES = ["run.updated", "step.updated", "inbox.changed", "issue.updated", "activity", "log"] as const;
 
 export interface ServerEvent {
   seq: number;
