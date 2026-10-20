@@ -35,10 +35,6 @@ export interface FlowCanvasProps {
   height?: number | string;
 }
 
-const nodeTypes = {
-  customNode: NodeCard as any,
-};
-
 const edgeTypes = {
   customEdge: CustomEdge as any,
 };
@@ -56,6 +52,7 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     onEdgesDelete,
     onNodeMove,
     positions: controlledPositions,
+    renderNode,
     height = "100%",
   } = props;
 
@@ -82,6 +79,17 @@ function FlowCanvasInner(props: FlowCanvasProps) {
   }, [nodes, edges, direction, controlledPositions, fitView]);
 
   const activePositions = controlledPositions || layoutPositions;
+
+  const nodeTypes = useMemo(() => {
+    return {
+      customNode: (nodeProps: any) => {
+        if (renderNode) {
+          return renderNode(nodeProps.data as CanvasNode);
+        }
+        return <NodeCard {...nodeProps} />;
+      }
+    };
+  }, [renderNode]);
 
   const rfNodes: ReactFlowNode[] = useMemo(() => {
     return nodes.map(n => {

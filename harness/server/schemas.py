@@ -137,6 +137,15 @@ class StepOut(Schema):
     finished_at: str | None = Field(description="When the step finished (ISO 8601).")
 
 
+class AgentConfigOut(Schema):
+    name: str = Field(description="Agent name.")
+    enabled: bool = Field(description="Always true for enabled agents.")
+
+
+class AgentsEnabled(Schema):
+    agents: list[AgentConfigOut] = Field(description="Enabled agents, sorted by name.")
+
+
 class RunDetail(Schema):
     run: RunSummary = Field(description="The run.")
     playbook: dict[str, Any] | None = Field(

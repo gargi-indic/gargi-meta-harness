@@ -1,0 +1,95 @@
+.board-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 48px);
+}
+
+.board-selector {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 8px 16px;
+}
+
+.board-container {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.board-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  padding: 16px;
+}
+
+@media (min-width: 860px) {
+  .board-container {
+    overflow-x: auto;
+  }
+  .board-grid {
+    grid-template-columns: repeat(7, minmax(180px, 1fr));
+    min-width: min-content;
+  }
+}
+
+.board-column-header {
+  font-size: 11px;
+  margin-bottom: 16px;
+}
+
+.board-column-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.board-column-empty {
+  color: var(--faint);
+  font-size: 14px;
+}
+
+.board-card {
+  background: var(--paper);
+  border: 1px solid var(--line-soft);
+  padding: 8px;
+  font-family: var(--font-sans);
+}
+
+.board-card-id {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.board-card-title {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.board-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.board-card-playbook {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.board-card-links {
+  font-size: 12px;
+}
+
+.board-card-links a {
+  color: var(--ink);
+}
+
+.board-card-links a:hover {
+  color: var(--accent);
+}
+
+.board-card-blocked {
+  font-size: 11px;
+  color: var(--warn, var(--muted)); /* fallback */
+}

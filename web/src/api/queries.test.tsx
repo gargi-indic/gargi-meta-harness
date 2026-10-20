@@ -38,6 +38,7 @@ describe('useInvalidateOnEvents', () => {
     const handler = renderHook();
     handler({ seq: 1, type: 'run.updated', data: {} });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.runs });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["board"] });
   });
 
   it('invalidates on step.updated with run_id', () => {
@@ -56,6 +57,7 @@ describe('useInvalidateOnEvents', () => {
     const handler = renderHook();
     handler({ seq: 3, type: 'inbox.changed', data: {} });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.inbox });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["board"] });
   });
 
   it('invalidates on issue.updated', () => {
@@ -63,5 +65,6 @@ describe('useInvalidateOnEvents', () => {
     handler({ seq: 4, type: 'issue.updated', data: {} });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.issues });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.campaigns });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["board"] });
   });
 });
