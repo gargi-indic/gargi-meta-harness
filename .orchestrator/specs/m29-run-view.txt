@@ -1,0 +1,266 @@
+Binding details for #29 (M2.7 Run View with live node overlay, step timeline, activity stream and controls). Where these differ from the issue, these win. Read the real code on main first, and reuse it instead of re-implementing it:
+- `web/src/ui/*` from #26: `Button`, `StatusTag + TONE_COLOR`, `Panel`, `DataTable`, `Field`, `Empty`.
+- `web/src/canvas/*` from #27: `FlowCanvas`, `playbookToGraph`, `NodeCard`, `portsFor`, `CanvasNode`, `NodeStatus`.
+- `web/src/api/*` from #26 & #28: `apiGet`, `apiPost`, `ApiError`, `useEventStream`, `useInvalidateOnEvents`, `queryKeys`.
+- `web/src/test/*` from #28: `fetchMock.ts` (`mockApi`), `fakeEventSource.ts` (`FakeEventSource`).
+- Server endpoints from #24 & #25: `harness/server/routes/runs.py` (`/api/runs`, `/api/runs/{id:path}`, `/api/runs/{id:path}/activity`), `harness/server/routes/actions.py` (`/api/runs/{id:path}/pause`, `/resume`, `/cancel`, `/nodes/{node}/retry`, `/message`, `/api/control-requests/{id}`).
+
+If something named here does not exist, use the closest existing thing and list it in the PR body.
+
+## 1. Files
+- `web/src/api/types.ts` (extend):
+  - Add `RunSummary`:
+    ```ts
+    export interface RunSummary {
+      id: string;
+      repo: string;
+      issue: number;
+      title: string;
+      playbook_id: string;
+      status: string; // running, needs-you, paused, done, failed, cancelled
+      agent: string | null;
+      pr: number | null;
+      current_node: string | null;
+      created_at: string;
+      updated_at: string;
+    }
+    ```
+  - Add `StepOut`:
+    ```ts
+    export interface StepOut {
+      id: string;
+      node: string;
+      visit: number;
+      status: string; // pending, running, waiting, done, failed
+      outcome: string | null;
+      ref: Record<string, unknown> | null;
+      started_at: string | null;
+      finished_at: string | null;
+    }
+    ```
+  - Add `RunDetail`:
+    ```ts
+    export interface RunDetail {
+      run: RunSummary;
+      playbook: any;
+      steps: StepOut[];
+      visit_counts: Record<string, number>;
+    }
+    ```
+  - Add `ActivityItem`:
+    ```ts
+    export interface ActivityItem {
+      seq: number;
+      ts: string | null;
+      step_id: string | null;
+      kind: string; // message, tool, state, note
+      text: string;
+    }
+    ```
+  - Add `ActivityPage`:
+    ```ts
+    export interface ActivityPage {
+      items: ActivityItem[];
+      next: number;
+    }
+    ```
+  - Add `ControlRequestOut`:
+    ```ts
+    export interface ControlRequestOut {
+      id: number;
+      run_id: string;
+      step_id: string | null;
+      kind: string;
+      status: string;
+      result: string | null;
+      created_at: string;
+      handled_at: string | null;
+    }
+    ```
+- `web/src/api/sse.ts`:
+  - Extend `EVENT_TYPES`:
+    ```ts
+    export const EVENT_TYPES = [
+      "run.updated",
+      "step.updated",
+      "activity",
+      "inbox.changed",
+      "issue.updated",
+      "log",
+    ] as const;
+    ```
+- `web/src/api/queries.ts` (extend):
+  - Update `queryKeys`:
+    - `queryKeys.runs` = `["runs"]`
+    - `queryKeys.run = (id: string) => ["runs", id]`
+    - `queryKeys.runActivity = (id: string) => ["runs", id, "activity"]`
+  - Add hooks:
+    - `useRuns(params?: { status?: string; issue?: number; repo?: string })` -> `GET /api/runs` (with query string if params given).
+    - `useRun(id: string)` -> `GET /api/runs/${encodeURIComponent(id)}` (enabled: `!!id`).
+    - `useRunActivity(id: string, after: number = 0)` -> `GET /api/runs/${encodeURIComponent(id)}/activity?after=${after}&limit=200` (enabled: `!!id`).
+  - Update `useInvalidateOnEvents`:
+    - On `'run.updated'`: invalidate `queryKeys.runs`, `["board"]`, and if `(e.data as any)?.run_id`, invalidate `queryKeys.run((e.data as any).run_id)`.
+    - On `'step.updated'`: if `(e.data as any)?.run_id`, invalidate `queryKeys.run((e.data as any).run_id)`; else invalidate `queryKeys.runs`.
+- `web/src/screens/run/`:
+  - `overlay.ts` and `overlay.test.ts`.
+  - `RunsListPage.tsx` and `RunsListPage.test.tsx`.
+  - `RunPage.tsx`, `run.css`, and `RunPage.test.tsx`.
+- `web/src/app/routes.tsx`:
+  - Replace `<Page title="Runs" />` at `/runs` with `<RunsListPage />`.
+  - Add `<Route path="/runs/:id" element={<RunPage />} />` and `<Route path="/runs/*" element={<RunPage />} />`.
+
+Do NOT touch: `src/ui/*`, `tokens.css`, `src/canvas/nodes/NodeCard.tsx` (it already supports `badge` and `status`), server files (no server changes needed), `.github/`, `docs/`, `.orchestrator/`, `.claude/`. Add no new packages.
+
+## 2. Overlay computation (`web/src/screens/run/overlay.ts`)
+Export `computeOverlay(steps: StepOut[], playbook?: { nodes?: Record<string, any> } | null): Record<string, NodeOverlay>`:
+```ts
+export interface NodeOverlay {
+  status: NodeStatus;
+  visits: number;
+  badge?: string;
+}
+```
+Rules:
+1. If `playbook?.nodes` is present, initialize all node keys with `{ status: "pending", visits: 0 }`.
+2. Group `steps` by node ID (`step.node`).
+3. For each node that has steps:
+   - `visits` is the number of steps (or max `step.visit`).
+   - The latest step (highest `visit` or last in order) determines status and badge:
+     - If latest step `status` is `"running"`: `status = "running"`.
+     - If latest step `status` is `"done"`: `status = "done"`.
+     - If latest step `status` is `"failed"`: `status = "failed"`.
+     - If latest step `status` is `"waiting"`: if node kind is `"gate"` (or `playbook?.nodes?.[node]?.kind === "gate"`), `status = "needs-you"`, otherwise `status = "waiting"`.
+     - If latest step `status` is `"pending"`: `status = "pending"`.
+   - Badge rules:
+     - If latest step `outcome === "exhausted"`, `badge = "EXHAUSTED"`.
+     - Else if `visits > 1`, `badge = `x${visits}``.
+     - Else `badge = undefined`.
+4. Nodes with no steps remain `{ status: "pending", visits: 0 }`.
+
+Export `RUN_TONE: Record<string, Tone>`:
+- `running`: `"live"`
+- `needs-you`: `"live"`
+- `done`: `"ok"`
+- `failed`: `"fail"`
+- `paused`: `"warn"`
+- `cancelled`: `"muted"`
+
+Export `STEP_TONE: Record<string, Tone>`:
+- `running`: `"live"`
+- `waiting`: `"warn"`
+- `done`: `"ok"`
+- `failed`: `"fail"`
+- `pending`: `"muted"`
+
+## 3. RunsListPage (`/runs`)
+- Shows a header with title "Runs".
+- Fetches runs with `useRuns()`.
+- Renders `DataTable<RunSummary>`:
+  - Columns:
+    - **Issue**: render as `<Link to={`/runs/${encodeURIComponent(run.id)}`}>#{run.issue} {run.title}</Link>`.
+    - **Playbook**: mono `{run.playbook_id}`.
+    - **Status**: `<StatusTag tone={RUN_TONE[run.status] || "muted"}>{run.status.toUpperCase()}</StatusTag>`.
+    - **Started**: mono formatted start date / ISO string (e.g. `run.created_at`).
+  - Empty state: `<Empty>No runs found.</Empty>`.
+
+## 4. RunPage (`/runs/:id` and `/runs/*`)
+- Extract `run_id`:
+  ```ts
+  const params = useParams();
+  const rawId = params.id || params["*"] || "";
+  const runId = decodeURIComponent(rawId);
+  ```
+- Fetch run details using `useRun(runId)`.
+- Desktop layout is an uneven two-column grid (`.run-page-grid`: canvas ~2/3, right column ~1/3), collapsing to 1 column below 860px in `run.css`.
+
+### Left column:
+1. **Header:**
+   - `#${run.issue} ${run.title}` in `<h1>` / `<h2>`.
+   - `<StatusTag tone={RUN_TONE[run.status] || "muted"}>{run.status.toUpperCase()}</StatusTag>`.
+   - Playbook ID in mono span: `run.playbook_id`.
+   - Elapsed time in mono: calculate from `run.created_at` to `run.updated_at` (or current time if running).
+2. **Playbook Graph:**
+   - Convert `runDetail.playbook` with `playbookToGraph(runDetail.playbook)`.
+   - Compute overlay with `computeOverlay(runDetail.steps, runDetail.playbook)`.
+   - Overlay `status` and `badge` onto each node in `nodes`.
+   - Render `FlowCanvas`:
+     ```tsx
+     <FlowCanvas
+       mode="view"
+       nodes={overlaidNodes}
+       edges={edges}
+       selectedId={selectedNodeId}
+       onSelect={(id) => setSelectedNodeId((curr) => (curr === id ? null : id))}
+       height={520}
+     />
+     ```
+   - Clicking a node selects it (`selectedNodeId`). Clicking an empty space or the same node deselects it (`null`).
+
+### Right column:
+1. **Controls Row:**
+   - **Pause/Resume toggle:**
+     - When `run.status === "running"`: show `<Button onClick={handlePause}>Pause</Button>` (`POST /api/runs/${encodeURIComponent(runId)}/pause`).
+     - When `run.status === "paused"`: show `<Button onClick={handleResume}>Resume</Button>` (`POST /api/runs/${encodeURIComponent(runId)}/resume`).
+   - **Cancel:**
+     - Requires an explicit confirm step using inline confirm text (NO modal):
+       Clicking Cancel shows inline confirm buttons ("Confirm Cancel" and "Dismiss") or replaces button text with "Confirm Cancel?".
+       Confirming hits `POST /api/runs/${encodeURIComponent(runId)}/cancel`.
+   - **Retry node:**
+     - `<Button disabled={!canRetry} onClick={handleRetry}>Retry node</Button>`.
+     - Enabled ONLY when `selectedNodeId` is set AND the latest step for `selectedNodeId` has status `"failed"` or `"done"`.
+     - Clicking sends `POST /api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(selectedNodeId)}/retry`.
+   - **Control request status polling:**
+     - Any control request returns 202 `{ request_id }`.
+     - After submitting, poll `GET /api/control-requests/${request_id}` every 500ms until `handled_at` is set (timeout 30s).
+     - Display the control request status and result text. If an error occurs, render inline in `--accent`.
+   - **Send message:**
+     - `<textarea placeholder="Message to agent..." value={messageText} onChange={...} />`
+     - `<Button disabled={!messageText.trim()} onClick={handleSendMessage}>Send message</Button>`.
+     - Calls `POST /api/runs/${encodeURIComponent(runId)}/message` with `{ text: messageText }`.
+     - On 202 response, clears the textarea.
+
+2. **Step Timeline:**
+   - Filtered by `selectedNodeId` if a node is selected; otherwise shows all steps from `runDetail.steps`.
+   - Render using `DataTable<StepOut>`:
+     - **Node**: mono `step.node`.
+     - **Visit**: mono `v${step.visit}`.
+     - **Status**: `<StatusTag tone={STEP_TONE[step.status] || "muted"}>{step.status.toUpperCase()}</StatusTag>`.
+     - **Outcome**: mono `step.outcome ?? "-"`.
+     - **Duration**: mono formatted duration from `step.started_at` to `step.finished_at` (e.g. `24s` or `1m 12s`, or `-`).
+
+3. **Activity Stream:**
+   - A scrolling mono list (`.activity-stream`).
+   - Initial items loaded from `useRunActivity(runId)`.
+   - Live updates: listen to SSE via `useEventStream`. When `e.type === "activity"`, if the activity item belongs to `runId`:
+     - Event payload can be the raw row `{ id, run_id, data }` or `ActivityItem`. Extract or map to `{ seq: e.data.id || e.seq, ts: e.data.ts || e.data.data?.ts, step_id: e.data.data?.step || e.data.step_id, kind: e.data.data?.kind || e.data.kind || "note", text: e.data.data?.text || e.data.text || "" }`.
+     - Append to activity list in order, deduplicating by `seq`.
+   - Filter items by `selectedNodeId` if selected (matching `activity.step_id` to selected node or steps for that node).
+   - Auto-scroll:
+     - Automatically scroll container to bottom when new items arrive.
+     - Pauses when the user scrolls up (e.g. `scrollTop + clientHeight < scrollHeight - 20`).
+   - CSS animation:
+     - New rows enter with a 150ms opacity transition (`opacity 150ms ease-in`).
+     - Disabled under `@media (prefers-reduced-motion: reduce)`.
+
+## 5. Tests
+- `overlay.test.ts`:
+  - Unit tests for `computeOverlay`:
+    - node with no steps is `pending`, visits 0.
+    - single visit done node is `done`, no badge.
+    - looped node shows `x3` badge when visits = 3.
+    - exhausted outcome shows `EXHAUSTED` badge.
+    - waiting gate maps to `needs-you` status.
+- `RunsListPage.test.tsx`:
+  - Renders runs list in a DataTable with correct links (`/runs/${encodeURIComponent(run.id)}`) and StatusTags.
+  - Renders empty state when no runs returned.
+- `RunPage.test.tsx`:
+  - Renders RunPage header, FlowCanvas view, timeline, activity stream.
+  - Selecting a node in canvas filters timeline to that node.
+  - Live activity: `FakeEventSource` emitting `activity` events appends rows without duplicates when overlapping with initial fetch.
+  - Controls:
+    - Pause / Resume toggle triggers correct endpoint and polls control request.
+    - Cancel requires explicit inline confirmation before hitting `/cancel`.
+    - Retry node is disabled when no node or running node is selected; enabled when failed/done node is selected.
+    - Send message button disabled when empty, sends POST on click, clears input on 202.
+  - Auto-scroll pauses after scroll event.
+  - Tests use `mockApi` and `cleanup()` in `afterEach()`.
