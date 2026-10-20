@@ -1,17 +1,26 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Header } from './Header';
+import { mockApi } from '../test/fetchMock';
 
 describe('Header', () => {
   it('toggles menu and active links', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    mockApi({
+      'GET /api/inbox': () => ({ status: 200, json: [] })
+    });
+
     render(
-      <MemoryRouter initialEntries={['/inbox']}>
-        <Header />
-        <Routes>
-          <Route path="/*" element={<div />} />
-        </Routes>
-      </MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/inbox']}>
+          <Header />
+          <Routes>
+            <Route path="/*" element={<div />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
     );
 
     const menuBtn = screen.getByRole('button', { name: 'Menu' });
