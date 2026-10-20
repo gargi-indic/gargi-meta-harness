@@ -1,0 +1,94 @@
+Binding details for #31 (M2.9 Playbook Editor screen: palette, canvas edit mode, schema inspector, validation panel, dry run, save). Where these differ from the issue, these win. Read the real code on main first, and reuse it instead of re-implementing it:
+- `@rjsf/core`, `@rjsf/utils`, `@rjsf/validator-ajv8` (pinned at 6.11.0 in `web/package.json`).
+- `web/src/ui/*`: `Button`, `StatusTag + TONE_COLOR`, `Panel`, `DataTable`, `Field`, `Empty`.
+- `web/src/canvas/*`: `FlowCanvas`, `playbookToGraph`, `NodeCard`, `portsFor`, `CanvasNode`, `CanvasEdge`. Note that `FlowCanvas` supports `mode="edit"`, `onConnect`, `onNodesDelete`, `onEdgesDelete`, `onNodeMove`.
+- `web/src/api/*`: `apiGet`, `apiPost`, `ApiError`, `queryKeys`.
+- Server endpoints from #30: `harness/server/routes/playbooks.py`:
+  - `GET /api/playbooks?repo=`
+  - `GET /api/playbooks/{id}?repo=`
+  - `GET /api/playbooks/schema`
+  - `POST /api/playbooks/validate` (`{ yaml, agents? }` -> `{ ok, issues: [{ severity, code, message, node, port, path }] }`)
+  - `POST /api/playbooks/dry-run` (`{ yaml, scenario?: { outcomes?: Record<string, string[]>, max_steps?: number } }` -> `{ terminated, trace: [{ node, visit, outcome }], gates_auto_resolved, error }`)
+  - `POST /api/playbooks/save` (`{ repo, id, yaml, message?, base? }` -> `{ pr: { number, url }, branch, existing }`)
+
+## 1. Files & Structure
+Under `web/src/screens/editor/`:
+- `PlaybooksListPage.tsx` and `PlaybooksListPage.test.tsx`:
+  - Route `/playbooks`.
+  - Header with title "Playbooks" and a "New playbook" `Button` (navigates to `/playbooks/new` or creates a skeleton playbook in memory: `{ apiVersion: "harness/v1", id: "new-playbook", nodes: {}, edges: {} }`).
+  - `DataTable` of playbooks from `GET /api/playbooks`:
+    - Columns: ID (link to `/playbooks/${encodeURIComponent(pb.id)}`), Source (mono: `builtin` | `repo`), Valid (`StatusTag`: ok for valid, fail for invalid).
+- `EditorPage.tsx`, `editor.css`, and `EditorPage.test.tsx`:
+  - Route `/playbooks/:id` (and `/playbooks/new`).
+  - Top bar:
+    - Playbook ID (or editable name if new).
+    - Dirty marker: mono text `MODIFIED` (visible only when `isDirty` is true).
+    - Actions: `Validate` button, `Dry run` button, `Save as PR` button (primary), `YAML` toggle button.
+    - If `YAML` mode is toggled on: renders a full mono `<textarea>` showing the serialized YAML (editable). Edits re-parse on change/blur; invalid YAML shows an inline error message and does NOT clobber the visual canvas state.
+  - Three-column desktop layout (`.editor-grid`: palette left 200px, canvas center flex: 1, inspector + validation panel right ~360px), collapsing into a vertical stack below 860px.
+- `state.ts` and `state.test.ts`:
+  - `useReducer` state holding the parsed playbook object as the single source of truth:
+    ```ts
+    export interface EditorState {
+      playbook: any; // Playbook AST/dict
+      yaml: string;
+      selectedNodeId: string | null;
+      isDirty: boolean;
+      history: any[]; // Undo stack (up to 50 entries)
+      future: any[];  // Redo stack
+    }
+    ```
+  - Actions:
+    - `addNode(kind: string)`: creates node with unique id `<kind>_<n>` and schema defaults, updates playbook object.
+    - `removeNode(id: string)`: deletes node from `nodes` and removes all connected edges from `edges`.
+    - `renameNode(oldId: string, newId: string)`: renames node key in `nodes` and updates all edge keys and targets.
+    - `connect(source: string, port: string | null, target: string)`: adds or updates edge in `edges` (`source.port` -> `target`).
+    - `disconnect(edgeKey: string)`: removes edge from `edges`.
+    - `updateNode(id: string, patch: any)`: merges patch into `nodes[id]`.
+    - `updateGates(gates: any)` / `updateLimits(limits: any)`: updates playbook top-level `gates` and `limits`.
+    - `undo()` / `redo()`: navigates history stack.
+- `convert.ts`:
+  - Extend existing `convert.ts` with `graphToPlaybook(currentPlaybook: any, nodes: CanvasNode[], edges: CanvasEdge[]): any`.
+  - Applies canvas changes (ports, targets, added/removed nodes) to the parsed playbook object while preserving unknown fields and top-level metadata.
+  - Round-trip lossless property: `yaml -> object -> graph -> object -> yaml` must preserve all fields of the default playbook fixture.
+- `Palette.tsx`:
+  - Square buttons for all schema node kinds: `agent`, `review`, `check`, `gate`, `branch`, `parallel`, `join`, `decompose`, `merge`, `escalate`, `notify`.
+  - Clicking a button adds a node to the canvas with unique id and default port structure.
+- `Inspector.tsx` and `rjsf-theme.tsx`:
+  - Uses `@rjsf/core` with validator `validator-ajv8`.
+  - When a node is selected: renders RJSF Form using the sub-schema for its `kind` (found under `$defs` in `/api/playbooks/schema`).
+  - Custom RJSF widgets/templates in `rjsf-theme.tsx`: wraps our `Field` and `Button` components, square inputs (`border-radius: 0`), JetBrains Mono for Jinja template fields. No default RJSF rounded corners.
+  - When no node is selected: renders inspector for playbook-level `gates` and `limits`.
+  - Edges are edited on the canvas, not in the form.
+- `ValidationPanel.tsx`:
+  - Automatically debounces (400ms) `POST /api/playbooks/validate` with current YAML.
+  - Lists issues in mono rows: `StatusTag` (`ERROR` / `WARN`), error code, message, node/port/path.
+  - Clicking an issue selects the corresponding node on the canvas.
+  - Nodes with validation errors receive dashed `--accent` border via canvas `status` (`status: "failed"` or `"needs-you"`).
+  - Save button is disabled while error-severity issues exist.
+- `DryRunPanel.tsx`:
+  - Allows entering scenario outcomes as JSON (or default empty scenario).
+  - "Run" button calls `POST /api/playbooks/dry-run`.
+  - Displays trace as `DataTable`: Node (mono), Visit (mono), Outcome (mono).
+  - Displays termination status: `done`, `escalated`, `max_steps`, or `error`.
+  - Highlights trace nodes on canvas.
+- Save flow:
+  - Button "Save as PR" (disabled if validation has errors or playbook is unmodified).
+  - Shows confirm dialog / inline prompt showing target repository and path (`.harness/playbooks/<id>.yaml`).
+  - Calls `POST /api/playbooks/save` with `{ repo, id, yaml }`.
+  - On 200 response, displays the created PR link and clears `isDirty`.
+  - Navigation blocker: warns user when navigating away if `isDirty` is true.
+
+## 2. Testing Requirements
+- `state.test.ts`:
+  - Unit tests for reducer: `addNode`, `removeNode`, `renameNode` (updating edge references), `connect`, `disconnect`, undo/redo (max 50).
+- `convert.test.ts`:
+  - Round-trip test: default playbook fixture round-trips losslessly through `playbookToGraph` and `graphToPlaybook`.
+- `EditorPage.test.tsx` (using `mockApi` and `cleanup()` in `afterEach()`):
+  - Renders 3-column layout (palette, canvas, inspector).
+  - Palette: clicking a node kind adds a node with unique id.
+  - Inspector: renders form for node kind, changing a field updates state.
+  - Validation: mocked `/api/playbooks/validate` response with errors disables Save; clicking an issue selects the node.
+  - Dry run: mocked `/api/playbooks/dry-run` displays trace table and termination status.
+  - Save: clicking Save calls `/api/playbooks/save`, renders PR link, and clears `MODIFIED` marker.
+  - YAML toggle: editing valid YAML updates canvas; editing invalid YAML shows parse error without wiping state.
