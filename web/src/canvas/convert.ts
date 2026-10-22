@@ -166,3 +166,41 @@ export function issueGraphToCanvas(g: IssueGraphResponse): { nodes: CanvasNode[]
 
   return { nodes, edges };
 }
+
+/**
+ * Apply canvas edits (added/removed nodes, rewired edges) onto the parsed playbook object.
+ * Unknown fields, top-level metadata and wildcard (`*.port`) edges of `current` are preserved.
+ */
+export function graphToPlaybook(current: any, nodes: CanvasNode[], edges: CanvasEdge[]): any {
+  const currentNodes: Record<string, any> = current?.nodes ?? {};
+  const currentEdges: Record<string, string> = current?.edges ?? {};
+
+  const nextNodes: Record<string, any> = {};
+  for (const n of nodes) {
+    if (n.kind === 'terminal' || n.id.startsWith('@')) continue;
+    nextNodes[n.id] = n.data !== undefined ? n.data : (currentNodes[n.id] ?? { kind: n.kind });
+  }
+
+  const explicit: Record<string, string> = {};
+  for (const e of edges) {
+    if (e.dashed || e.id.startsWith('wild:')) continue; // derived from `*.port` edges
+    if (!(e.source in nextNodes)) continue;
+    const key = e.sourcePort ? `${e.source}.${e.sourcePort}` : e.id;
+    explicit[key] = e.target;
+  }
+
+  // Keep original key order where possible, then append new edges.
+  const nextEdges: Record<string, string> = {};
+  for (const [key, target] of Object.entries(currentEdges)) {
+    if (key.startsWith('*.')) {
+      nextEdges[key] = target;
+    } else if (key in explicit) {
+      nextEdges[key] = explicit[key];
+    }
+  }
+  for (const [key, target] of Object.entries(explicit)) {
+    if (!(key in nextEdges)) nextEdges[key] = target;
+  }
+
+  return { ...current, nodes: nextNodes, edges: nextEdges };
+}

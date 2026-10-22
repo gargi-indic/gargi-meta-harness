@@ -131,14 +131,14 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     }
   }, [mode, onConnect]);
 
-  const handleSelectionChange = useCallback(({ nodes: selNodes }: { nodes: ReactFlowNode[] }) => {
-    if (onSelect) {
-      if (selNodes.length > 0) {
-        onSelect(selNodes[0].id);
-      } else {
-        onSelect(null);
-      }
-    }
+  // Selection is driven by user clicks only; reacting to onSelectionChange would echo the controlled
+  // `selectedId` prop back to the parent and can loop (select -> deselect -> select ...).
+  const handleNodeClick = useCallback((_event: React.MouseEvent, node: ReactFlowNode) => {
+    onSelect?.(node.id);
+  }, [onSelect]);
+
+  const handlePaneClick = useCallback(() => {
+    onSelect?.(null);
   }, [onSelect]);
 
   const handleNodesDelete = useCallback((deleted: ReactFlowNode[]) => {
@@ -167,7 +167,8 @@ function FlowCanvasInner(props: FlowCanvasProps) {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onConnect={handleConnect}
-        onSelectionChange={handleSelectionChange}
+        onNodeClick={handleNodeClick as any}
+        onPaneClick={handlePaneClick}
         onNodesDelete={handleNodesDelete}
         onEdgesDelete={handleEdgesDelete}
         onNodeDragStop={handleNodeDragStop as any}

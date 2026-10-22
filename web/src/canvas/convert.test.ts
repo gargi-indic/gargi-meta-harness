@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest';
-import { playbookToGraph, issueGraphToCanvas } from './convert';
+import YAML from 'yaml';
+import { playbookToGraph, issueGraphToCanvas, graphToPlaybook } from './convert';
 import { portsFor, PlaybookNode } from './ports';
 import portsCases from '../generated/ports.cases.json';
 import planBuildReview from './__fixtures__/plan-build-review.json';
@@ -93,5 +94,47 @@ describe('convert', () => {
     expect(nodes[0].id).toBe("#12");
     expect(nodes[0].status).toBe("pending");
     expect(edges[0].id).toBe("#12->#13");
+  });
+});
+
+describe('graphToPlaybook', () => {
+  const yamlText = YAML.stringify(planBuildReview);
+
+  test('default playbook round-trips losslessly yaml -> object -> graph -> object -> yaml', () => {
+    const obj = YAML.parse(yamlText);
+    const { nodes, edges } = playbookToGraph(obj);
+    const back = graphToPlaybook(obj, nodes, edges);
+    expect(back).toEqual(obj);
+    expect(YAML.parse(YAML.stringify(back))).toEqual(planBuildReview);
+  });
+
+  test('preserves unknown fields and top-level metadata', () => {
+    const obj = { ...YAML.parse(yamlText), x_custom: { a: 1 } };
+    obj.nodes.plan = { ...obj.nodes.plan, x_extra: true };
+    const { nodes, edges } = playbookToGraph(obj);
+    const back = graphToPlaybook(obj, nodes, edges);
+    expect(back.x_custom).toEqual({ a: 1 });
+    expect(back.nodes.plan.x_extra).toBe(true);
+    expect(back.gates).toEqual(obj.gates);
+    expect(back.limits).toEqual(obj.limits);
+  });
+
+  test('applies added edges, removed edges and removed nodes', () => {
+    const obj = YAML.parse(yamlText);
+    const { nodes, edges } = playbookToGraph(obj);
+
+    const rewired = edges
+      .filter(e => e.id !== 'plan_review.changes')
+      .map(e => (e.id === 'plan.plan_ready' ? { ...e, target: 'implement' } : e));
+    rewired.push({ id: 'x', source: 'implement', sourcePort: 'timeout', target: 'escalate' });
+    const back = graphToPlaybook(obj, nodes, rewired);
+    expect(back.edges['plan.plan_ready']).toBe('implement');
+    expect('plan_review.changes' in back.edges).toBe(false);
+    expect(back.edges['implement.timeout']).toBe('escalate');
+
+    const without = nodes.filter(n => n.id !== 'fix');
+    const back2 = graphToPlaybook(obj, without, edges.filter(e => e.source !== 'fix'));
+    expect('fix' in back2.nodes).toBe(false);
+    expect(Object.keys(back2.edges).some(k => k.startsWith('fix.'))).toBe(false);
   });
 });
