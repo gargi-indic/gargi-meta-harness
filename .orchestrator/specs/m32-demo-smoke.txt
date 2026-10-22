@@ -1,0 +1,28 @@
+Binding details for #32 (M2.10 demo seed + Playwright smoke). Where these differ from the issue, these win. Read the real code on main FIRST and reuse it; do not reimplement:
+- `harness/server/app.py` (`create_app`, `/api/health`, TokenGuard in `auth.py`), `harness/server/routes/*` (actions, inbox, runs, playbooks), `harness/server/runner.py`, `harness/server/events.py`, `harness/cli.py` (existing `serve` command), `tests/fixtures/server_seed.py` (`seed_store`, `seed_config`), `tests/server/conftest.py`, `harness/playbooks/` (built-in `plan-build-review`), `harness/adapters` (FakeAdapter).
+- `@playwright/test` is PRE-PINNED at exactly 1.64.1 in `web/package.json` (devDependency) and `web/package-lock.json` on main. Do NOT change versions or add other dependencies. Do not create root package.json / package-lock.json.
+
+## 1. Python
+- Move `seed_store`/`seed_config` and their helpers from `tests/fixtures/server_seed.py` to `harness/server/demo_seed.py`; leave `tests/fixtures/server_seed.py` as a thin re-export so existing tests are unchanged. Seed data must contain no secrets or real repo names (use `demo/example`).
+- `harness/server/demo.py`: `create_demo_app() -> tuple[FastAPI, str]` (app, token). In-memory SQLite store seeded via `seed_store`; `DemoGitHub` implementing only the methods the server calls (contents get/put, refs, create PR) in memory, returning `https://example.invalid/pr/<n>` and recording created PRs; `DemoDriver` that on `POST /api/demo/start-run` runs the real engine Runner with FakeAdapter over `plan-build-review`, one step per 500ms (injectable interval so unit tests use 0). The `merge` gate is human, so the run parks and an Inbox item appears. Approval goes through the EXISTING action API; after approval the run reaches `done`. `POST /api/demo/start-run` exists only in the demo app.
+- `/api/health` gains `demo: bool` (False by default, True in demo app). Keep existing fields.
+- CLI: `harness serve --demo` (and `--no-open`, `--port` if not already present). It needs no network and no token file. The token is `HARNESS_DEMO_TOKEN` if set (accepted ONLY with `--demo`), else generated; print the token URL on stdout as the normal serve does. Refuse to start (non-zero exit, clear message) if `--demo` is given while a real GitHub token / non-demo repo registration is configured (check how config/secrets expose this; keep the check small). Without `--demo`, demo routes/behaviour must be impossible.
+- Web: render a mono tag `DEMO DATA` in the header when `health.demo` is true (uppercase 11px mono square-bordered tag; tokens only).
+
+## 2. Playwright (`web/e2e/smoke.spec.ts`, `web/playwright.config.ts`)
+- chromium only; `webServer` runs `uv run harness serve --demo --no-open --port 8799` from the repo root (set `cwd`), env `HARNESS_DEMO_TOKEN=smoke`; baseURL carries the token as the app expects (see how auth.py/static.py accept it). `reuseExistingServer: !process.env.CI`. Traces on first retry. Add `web/e2e` and `playwright-report`/`test-results` to .gitignore as needed. Exclude `e2e/` from vitest (`vitest.config.ts`) and make sure eslint and `tsc --noEmit` still pass with the e2e files.
+- Seven scenarios exactly as in the issue (1 Campaigns, 2 Board, 3 start run + RUNNING + activity rows + merge gate in Inbox, 4 approve -> done, 5 Editor delete edge/validation error/undo/clear/Save as PR link, 6 mobile 375px no horizontal scroll on /board and /inbox, 7 design guard border-radius 0px and no box-shadow). Use `expect.poll`/web-first assertions, never fixed sleeps. Select by role/text; add `data-testid` only where there is no stable role/text, and keep it minimal. If an assertion exposes a real UI bug, fix the UI minimally and note it in the PR body.
+- Scenario 5 uses the editor from #31: edit via canvas (delete edge) and undo via the Undo control; if the editor lacks a visible Undo button/keyboard shortcut, add the minimal one.
+
+## 3. CI
+- New job `e2e` in `.github/workflows/ci.yml`: checkout `actions/checkout@v7.0.1`, `astral-sh/setup-uv@v10.3.0` (python 3.12), `actions/setup-node@v7.1.0` (node 22, cache npm), `uv sync --all-extras --dev`, `npm ci`, `npx playwright install --with-deps chromium`, `npm run build`, `npx playwright test`, upload `web/test-results` + `web/playwright-report` on failure with `actions/upload-artifact` at a version you have VERIFIED exists (`gh api repos/actions/upload-artifact/git/ref/tags/<tag>`; state which in the PR). Reuse the exact action pins already in ci.yml; do not touch the existing jobs. Add an `e2e` npm script (`playwright test`).
+
+## 4. Tests required
+- pytest (no network): `tests/server/test_demo.py` - DemoDriver full FakeAdapter run reaches the merge gate, then `done` after approval via the action API; health `demo` true/false; `start-run` 404 on the non-demo app; DemoGitHub create PR returns the example.invalid URL; CLI refusal when a real token/repo is configured (typer CliRunner); `--demo` boots without a token file.
+- Vitest: header renders `DEMO DATA` only when health.demo.
+
+## 5. Do-not-add list
+No new Python or npm dependencies; no other browsers; no screenshot/visual tests; no real GitHub/network; no changes under docs/PLAN.md, .orchestrator/, .claude/; no refactors of modules beyond the minimal extension points above.
+
+## 6. Reporting
+State in chat what you actually ran (ruff, pytest, npm lint/typecheck/test/build, `npx playwright test`) with raw tails, and what you did not. Run the Playwright suite locally if chromium can be installed; if not, say so plainly.
