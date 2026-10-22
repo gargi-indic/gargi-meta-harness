@@ -6,6 +6,8 @@ import { BoardPage } from '../screens/board/BoardPage';
 import { InboxPage } from '../screens/inbox/InboxPage';
 import { RunsListPage } from '../screens/run/RunsListPage';
 import { RunPage } from '../screens/run/RunPage';
+import { PlaybooksListPage } from '../screens/editor/PlaybooksListPage';
+import { EditorPage } from '../screens/editor/EditorPage';
 
 // Lazy load DevCanvasPage so it can be tree-shaken in prod
 const DevCanvasPage = import.meta.env.DEV ? React.lazy(() => import('../canvas/DevCanvasPage')) : null;
@@ -21,7 +23,9 @@ export function AppRoutes() {
       <Route path="/runs" element={<RunsListPage />} />
       <Route path="/runs/:id" element={<RunPage />} />
       <Route path="/runs/*" element={<RunPage />} />
-      <Route path="/playbooks" element={<Page title="Playbooks" />} />
+      <Route path="/playbooks" element={<PlaybooksListPage />} />
+      <Route path="/playbooks/new" element={<EditorPage />} />
+      <Route path="/playbooks/:id" element={<EditorPage />} />
 
       {import.meta.env.DEV && DevCanvasPage && (
         <Route path="/dev/canvas" element={

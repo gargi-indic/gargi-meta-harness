@@ -12,7 +12,10 @@ describe('AppRoutes', () => {
   beforeEach(() => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
     mockApi({
-      'GET /api/campaigns': () => ({ status: 200, json: [] })
+      'GET /api/campaigns': () => ({ status: 200, json: [] }),
+      'GET /api/playbooks': () => ({ status: 200, json: [] }),
+      'GET /api/playbooks/x': () => ({ status: 200, json: { id: 'x', source: 'repo', path: 'p', sha: null, valid: true, parsed: null, yaml: 'apiVersion: harness/v1\nid: x\nnodes: {}\nedges: {}\n' } }),
+      'POST /api/playbooks/validate': () => ({ status: 200, json: { ok: true, issues: [] } })
     });
   });
 
@@ -35,6 +38,20 @@ describe('AppRoutes', () => {
       </QueryClientProvider>
     );
     expect(screen.getByRole('heading', { name: 'Playbooks' })).toBeInTheDocument();
+  });
+
+  it('routes /playbooks/new and /playbooks/:id to the editor', async () => {
+    for (const path of ['/playbooks/new', '/playbooks/x']) {
+      const { unmount } = render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[path]}>
+            <AppRoutes />
+          </MemoryRouter>
+        </QueryClientProvider>
+      );
+      expect(await screen.findByText('Palette')).toBeInTheDocument();
+      unmount();
+    }
   });
 
   it('renders not found for unknown route', () => {

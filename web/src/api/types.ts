@@ -203,3 +203,16 @@ export interface SaveResponse {
   branch: string;
   existing: boolean;
 }
+
+export interface PlaybookSummary {
+  id: string;
+  source: 'builtin' | 'repo';
+  path: string;
+  sha: string | null;
+  valid: boolean;
+}
+
+export interface PlaybookDetail extends PlaybookSummary {
+  yaml: string;
+  parsed: Record<string, unknown> | null;
+}

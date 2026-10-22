@@ -1,83 +1,60 @@
-import { useState } from 'react';
 import { Button } from '../../ui/Button';
-import { DataTable } from '../../ui/DataTable';
+import { DataTable, Column } from '../../ui/DataTable';
 import { TraceStep, DryRunResponse } from '../../api/types';
 
+export const DEFAULT_SCENARIO = '{\n  "outcomes": {},\n  "max_steps": 200\n}';
+
 export interface DryRunPanelProps {
-  onRun: (scenarioJson: string) => Promise<DryRunResponse | null>;
+  scenarioText: string;
+  onScenarioChange: (text: string) => void;
+  onRun: () => void;
   isRunning: boolean;
+  result: DryRunResponse | null;
+  error: string | null;
 }
 
-export function DryRunPanel({ onRun, isRunning }: DryRunPanelProps) {
-  const [scenarioText, setScenarioText] = useState('{\n  "outcomes": {},\n  "max_steps": 200\n}');
-  const [result, setResult] = useState<DryRunResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+const mono = { fontFamily: '"JetBrains Mono", monospace' } as const;
 
-  const handleRun = async () => {
-    setError(null);
-    try {
-      const res = await onRun(scenarioText);
-      setResult(res);
-    } catch (e: any) {
-      setError(e.detail || e.message || 'Run failed');
-    }
-  };
-
-  const columns: any[] = [
-    {
-      key: 'visit',
-      header: 'Visit',
-      render: (r: TraceStep) => <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{r.visit}</span>
-    },
-    {
-      key: 'node',
-      header: 'Node',
-      render: (r: TraceStep) => <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{r.node}</span>
-    },
-    {
-      key: 'outcome',
-      header: 'Outcome',
-      render: (r: TraceStep) => <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{r.outcome || '-'}</span>
-    }
+export function DryRunPanel({ scenarioText, onScenarioChange, onRun, isRunning, result, error }: DryRunPanelProps) {
+  const columns: Column<TraceStep>[] = [
+    { key: 'node', header: 'Node', render: (r) => <span style={mono}>{r.node}</span> },
+    { key: 'visit', header: 'Visit', render: (r) => <span style={mono}>{r.visit}</span> },
+    { key: 'outcome', header: 'Outcome', render: (r) => <span style={mono}>{r.outcome || '-'}</span> },
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column' }}>
+    <div id="dry-run-panel" style={{ display: 'flex', flexDirection: 'column' }}>
       <div style={{ padding: 16, borderBottom: '1px solid var(--line-soft)', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ fontSize: 12, fontWeight: 600 }}>Scenario (JSON)</div>
+        <label htmlFor="dry-run-scenario" style={{ fontSize: 12, fontWeight: 600 }}>Scenario (JSON)</label>
         <textarea
+          id="dry-run-scenario"
           value={scenarioText}
-          onChange={(e) => setScenarioText(e.target.value)}
+          onChange={(e) => onScenarioChange(e.target.value)}
           style={{
+            ...mono,
             width: '100%',
             height: '100px',
-            fontFamily: '"JetBrains Mono", monospace',
             fontSize: '12px',
             padding: '8px',
             border: '1px solid var(--ink)',
-            // No border-radius rule!
             resize: 'vertical',
             background: 'var(--bg)',
-            color: 'var(--ink)'
+            color: 'var(--ink)',
           }}
         />
-        <Button onClick={handleRun} disabled={isRunning} style={{ alignSelf: 'flex-start' }}>
+        <Button onClick={onRun} disabled={isRunning} style={{ alignSelf: 'flex-start' }}>
           {isRunning ? 'Running...' : 'Run'}
         </Button>
-        {error && <div style={{ color: 'var(--fail)', fontSize: 12, marginTop: 8 }}>{error}</div>}
+        {error && <div role="alert" style={{ color: 'var(--accent)', fontSize: 12, marginTop: 8 }}>{error}</div>}
       </div>
 
       {result && (
         <div style={{ padding: 16 }}>
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, display: 'flex', justifyContent: 'space-between' }}>
             <span>Trace</span>
-            <span style={{
-              color: result.terminated === 'done' ? 'var(--ok)' : (result.terminated === 'error' ? 'var(--fail)' : 'var(--warn)')
-            }}>
-              {result.terminated.toUpperCase()}
-            </span>
+            <span data-testid="dry-run-status" style={mono}>{result.terminated}</span>
           </div>
-          {result.error && <div style={{ color: 'var(--fail)', fontSize: 12, marginBottom: 8 }}>{result.error}</div>}
+          {result.error && <div style={{ color: 'var(--accent)', fontSize: 12, marginBottom: 8 }}>{result.error}</div>}
           <DataTable rows={result.trace} columns={columns} rowKey={(r) => `${r.node}-${r.visit}`} />
         </div>
       )}

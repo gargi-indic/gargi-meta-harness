@@ -23,9 +23,25 @@ export type EditorAction =
   | { type: 'REDO' }
   | { type: 'SELECT_NODE'; id: string | null }
   | { type: 'SET_YAML'; yaml: string }
-  | { type: 'SYNC_FROM_YAML'; playbook: any };
+  | { type: 'SYNC_FROM_YAML'; playbook: any }
+  | { type: 'MARK_SAVED' };
 
 const MAX_HISTORY = 50;
+
+/** Required-field defaults per node kind (from the playbook JSON schema) so a fresh node is renderable. */
+export const NODE_DEFAULTS: Record<string, Record<string, unknown>> = {
+  agent: { session: 'main', action: 'plan' },
+  review: { target: 'plan', checklist: [] },
+  check: { check: 'ci' },
+  gate: { gate: 'merge' },
+  branch: { cases: [], default: 'else' },
+  parallel: { branches: [] },
+  join: { mode: 'all' },
+  decompose: {},
+  merge: {},
+  escalate: {},
+  notify: { message: '' },
+};
 
 function pushHistory(state: EditorState, newPlaybook: any): EditorState {
   const history = [...state.history, state.playbook].slice(-MAX_HISTORY);
@@ -37,6 +53,19 @@ function pushHistory(state: EditorState, newPlaybook: any): EditorState {
     isDirty: true,
   };
 }
+
+function same(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export const initialEditorState = (playbook: any = { apiVersion: 'harness/v1', id: 'new-playbook', nodes: {}, edges: {} }): EditorState => ({
+  playbook,
+  yaml: '',
+  selectedNodeId: null,
+  isDirty: false,
+  history: [],
+  future: [],
+});
 
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
   switch (action.type) {
@@ -72,7 +101,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...pb,
         nodes: {
           ...nodes,
-          [newId]: { kind: action.kind } // basic schema defaults
+          [newId]: { kind: action.kind, ...structuredClone(NODE_DEFAULTS[action.kind] ?? {}) }
         }
       };
 
@@ -81,6 +110,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
 
     case 'REMOVE_NODE': {
       const pb = state.playbook;
+      if (!pb.nodes || !(action.id in pb.nodes)) return state;
       const nodes = { ...pb.nodes };
       delete nodes[action.id];
 
@@ -94,7 +124,10 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         }
       }
 
-      return pushHistory(state, { ...pb, nodes, edges });
+      return {
+        ...pushHistory(state, { ...pb, nodes, edges }),
+        selectedNodeId: state.selectedNodeId === action.id ? null : state.selectedNodeId,
+      };
     }
 
     case 'RENAME_NODE': {
@@ -130,7 +163,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
           let nextV = v as string;
 
           if (source === oldId) {
-            nextK = `${newId}.${port}`;
+            nextK = port ? `${newId}.${port}` : newId;
           }
           if (nextV === oldId) {
             nextV = newId;
@@ -153,7 +186,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const { source, port, target } = action;
       const pb = state.playbook;
       const edges = { ...pb.edges };
-      const edgeKey = port ? `${source}.${port}` : source; // though source should have port normally, wildcards are *.port
+      if (!port) return state; // edges are keyed `source.port`; a portless source cannot be wired
+      const edgeKey = `${source}.${port}`;
+      if (edges[edgeKey] === target) return state;
       edges[edgeKey] = target;
 
       return pushHistory(state, { ...pb, edges });
@@ -162,9 +197,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'DISCONNECT': {
       const pb = state.playbook;
       const edges = { ...pb.edges };
-      if (edges[action.id]) {
-         delete edges[action.id];
-      }
+      if (!(action.id in edges)) return state;
+      delete edges[action.id];
       return pushHistory(state, { ...pb, edges });
     }
 
@@ -173,17 +207,21 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const nodes = { ...pb.nodes };
       if (!nodes[action.id]) return state;
 
-      nodes[action.id] = { ...nodes[action.id], ...action.patch };
+      const merged = { ...nodes[action.id], ...action.patch };
+      if (same(merged, nodes[action.id])) return state;
+      nodes[action.id] = merged;
       return pushHistory(state, { ...pb, nodes });
     }
 
     case 'UPDATE_GATES': {
       const pb = state.playbook;
+      if (same(pb.gates, action.gates)) return state;
       return pushHistory(state, { ...pb, gates: action.gates });
     }
 
     case 'UPDATE_LIMITS': {
       const pb = state.playbook;
+      if (same(pb.limits, action.limits)) return state;
       return pushHistory(state, { ...pb, limits: action.limits });
     }
 
@@ -225,8 +263,12 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     }
 
     case 'SYNC_FROM_YAML': {
+      if (same(state.playbook, action.playbook)) return state;
       return pushHistory(state, action.playbook);
     }
+
+    case 'MARK_SAVED':
+      return { ...state, isDirty: false };
 
     default:
       return state;
