@@ -12,10 +12,12 @@ from collections.abc import Awaitable, Callable
 
 from harness.app import App
 from harness.config import RepoConfig
+from harness.dag import ready_set
+from harness.engine.dispatcher import Dispatcher
 from harness.github.commands import poll_commands
 from harness.lock import Lock, LockHeld, acquire, heartbeat, iso, release
 from harness.secrets import redact
-from harness.store.repo import append_event, get_repo
+from harness.store.repo import append_event, get_repo, list_issues, list_runs
 from harness.sync import sync_repo
 
 
@@ -124,6 +126,7 @@ async def run_daemon(
     commands_every: float = 30,
     heartbeat_every: float = 60,
     idle: float = 1.0,
+    dispatch_every: float | None = None,
 ) -> None:
     """Run until ``stop`` is set. Raises :class:`LockHeld` (having started nothing) if a repo is locked."""
     locks: dict[str, Lock] = {}
@@ -157,6 +160,22 @@ async def run_daemon(
                     _every(app, stop, "sync", sync_every, _sync_job(app, repo), first=False, repo=repo)
                 )
             )
+        if dispatch_every is not None:
+            for entry in app.cfg.repos:
+                repo_name = entry.name
+                tasks.append(
+                    asyncio.create_task(
+                        _every(
+                            app,
+                            stop,
+                            "dispatch",
+                            dispatch_every,
+                            _dispatch_job(app, repo_name),
+                            first=True,
+                            repo=repo_name,
+                        )
+                    )
+                )
         for repo, lock in locks.items():
             tasks.append(
                 asyncio.create_task(
@@ -216,5 +235,31 @@ def _heartbeat_job(app: App, stop: asyncio.Event, repo: str, lock: Lock) -> Call
             )
             stop.set()  # somebody forced the lock away: stop acting on this repo (and the rest)
             return None
+
+    return job
+
+
+def _dispatch_job(app: App, repo: str) -> Callable[[], Awaitable[object]]:
+    async def job() -> object:
+        caps = {name: cfg.max_concurrency for name, cfg in app.cfg.agents.items() if cfg.enabled}
+        global_cap = getattr(app.cfg, "global_cap", None)
+        dispatcher = Dispatcher(store=app.store, caps=caps, global_cap=global_cap, clock=app.clock)
+
+        async def ready_provider():
+            issues = list_issues(app.store, repo)
+            runs = list_runs(app.store)
+            running_issues = {r.issue for r in runs if r.status == "running" and r.repo == repo}
+            config = app.repo_configs.get(repo) or RepoConfig()
+            escalate_labels = config.escalate.labels if config.escalate else ["needs-discussion"]
+
+            ready_nums = ready_set(issues, running_issues, escalate_labels)
+            return [i for i in issues if i.number in ready_nums]
+
+        async def resolve_playbook(r: str, p_id: str):
+            from harness.cli import _resolve_playbook
+
+            return await _resolve_playbook(app, r, p_id, None)
+
+        return await dispatcher.tick(app.runner, ready_provider, resolve_playbook)
 
     return job
