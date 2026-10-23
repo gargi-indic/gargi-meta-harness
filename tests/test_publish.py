@@ -269,3 +269,90 @@ async def test_token_redaction(wt_manager, setup_git, github, respx_mock, caplog
     assert "github_pat_SECRET123" not in err_str
     # removed because git automatically redacts basic auth, or our redactor did it.
     assert "github_pat_SECRET123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_publish_draft_passthrough(wt_manager, setup_git, github, respx_mock):
+    tmp_path, remote, _ = setup_git
+    wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
+
+    (wt.path / "file1.txt").write_text("hello")
+
+    pr_url = "https://api.github.com/repos/owner/repo/pulls"
+    respx_mock.get(f"{pr_url}?per_page=100&head=owner:harness/1-slug&state=open").respond(200, json=[])
+    create_pr_mock = respx_mock.post(pr_url).respond(201, json={"number": 42, "html_url": "url"})
+
+    await publish_worktree(
+        wt=wt, gh=github, repo="owner/repo", issue_number=1, issue_title="Test", draft=True
+    )
+
+    import json
+
+    req = create_pr_mock.calls.last.request
+    payload = json.loads(req.content)
+    assert payload["draft"] is True
+
+
+@pytest.mark.asyncio
+async def test_push_revision_protected_path(wt_manager, setup_git, github):
+    tmp_path, remote, _ = setup_git
+    wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
+
+    import subprocess
+
+    remote_sha_before = subprocess.run(
+        ["git", "rev-parse", "harness/1-slug"], cwd=remote, capture_output=True, text=True
+    ).stdout.strip()
+
+    (wt.path / ".harness").mkdir()
+    (wt.path / ".harness/secret.txt").write_text("secret")
+
+    with pytest.raises(ProtectedPathViolation) as exc:
+        await push_revision(wt, message="Test", protected_paths=[".harness/"])
+
+    assert ".harness/secret.txt" in str(exc.value)
+
+    remote_sha_after = subprocess.run(
+        ["git", "rev-parse", "harness/1-slug"], cwd=remote, capture_output=True, text=True
+    ).stdout.strip()
+    assert remote_sha_before == remote_sha_after
+
+
+@pytest.mark.asyncio
+async def test_push_revision_no_changes(wt_manager, setup_git, github):
+    tmp_path, remote, _ = setup_git
+    wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
+
+    with pytest.raises(PublishError) as exc:
+        await push_revision(wt, message="Test")
+
+    assert "nothing to commit" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_publish_delete_protected_path(wt_manager, setup_git, github, respx_mock):
+    tmp_path, remote, _ = setup_git
+    wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
+
+    (wt.path / ".harness").mkdir()
+    (wt.path / ".harness/tracked.txt").write_text("tracked")
+
+    import subprocess
+
+    subprocess.run(["git", "add", ".harness/tracked.txt"], cwd=wt.path, check=True)
+    subprocess.run(["git", "commit", "-m", "add protected"], cwd=wt.path, check=True)
+    subprocess.run(["git", "push", "origin", "harness/1-slug:harness/1-slug"], cwd=wt.path, check=True)
+
+    (wt.path / ".harness/tracked.txt").unlink()
+
+    with pytest.raises(ProtectedPathViolation) as exc:
+        await publish_worktree(
+            wt=wt,
+            gh=github,
+            repo="owner/repo",
+            issue_number=1,
+            issue_title="Test",
+            protected_paths=[".harness/"],
+        )
+
+    assert ".harness/tracked.txt" in str(exc.value)

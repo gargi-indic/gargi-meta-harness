@@ -28,3 +28,13 @@ def test_match_protected_case_sensitive():
 def test_match_protected_empty_patterns():
     assert match_protected("file.txt", ["", "file.txt"]) is True
     assert match_protected("file.txt", [""]) is False
+
+
+def test_match_protected_negative_prefix():
+    assert match_protected("my.harness.txt", [".harness/"]) is False
+
+
+def test_match_protected_glob():
+    assert match_protected("test.lock", ["*.lock"]) is True
+    assert match_protected("nested/path/file.lock", ["*.lock"]) is True
+    assert match_protected("test.lock.tmp", ["*.lock"]) is False
