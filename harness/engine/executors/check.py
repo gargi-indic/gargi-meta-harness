@@ -12,6 +12,7 @@ from urllib.parse import quote
 from harness.engine.executors.base import Done, ExecContext, Waiting
 from harness.github.client import GitHub, GitHubError
 from harness.playbook.models import CheckNode
+from harness.scope import match_protected as _is_protected
 from harness.store.repo import StepRow
 
 MAX_ITEMS = 20
@@ -209,16 +210,6 @@ def _pr_number(ctx: ExecContext) -> int | None:
     if isinstance(number, bool) or not isinstance(number, int):
         return None
     return number
-
-
-def _is_protected(path: str, protected: list[str]) -> bool:
-    for entry in protected:
-        if entry.endswith("/"):
-            if path.startswith(entry):
-                return True
-        elif path == entry or path.startswith(entry + "/"):
-            return True
-    return False
 
 
 def _basename(path: str) -> str:
