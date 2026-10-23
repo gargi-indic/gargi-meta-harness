@@ -1,0 +1,4 @@
+{"session_id": "codex_456", "event": "start"}
+{"event": "message", "text": "Implementing."}
+{"event": "patch", "text": "--- a/foo.py\n+++ b/foo.py\n@@ -1,1 +1,2 @@\n-old\n+new\n"}
+{"event": "done"}

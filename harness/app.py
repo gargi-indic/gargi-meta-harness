@@ -12,9 +12,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from harness.adapters.base import AdapterRegistry
+from harness.adapters.codex import CodexAdapter, CodexAgentConfig
 from harness.adapters.fake import FakeAdapter
 from harness.adapters.jules import JulesAdapter
-from harness.config import GlobalConfig, RepoConfig
+from harness.config import AgentConfig, GlobalConfig, RepoConfig
 from harness.engine.executors import default_registry
 from harness.engine.executors.base import ExecutorRegistry
 from harness.engine.runner import Runner
@@ -26,6 +27,7 @@ from harness.secrets import github_token, load_env_files
 from harness.store.db import Store
 from harness.store.etag_cache import SqliteEtagCache
 from harness.store.repo import get_repo
+from harness.workspaces import WorktreeManager
 
 
 @dataclass
@@ -91,6 +93,8 @@ def build_app(
         gh = GitHub(token=github_token(), cache=SqliteEtagCache(store), sleep=sleep)
     client = gh
 
+    repo_configs = _stored_repo_configs(store, cfg)
+
     if adapters is None:
         adapters = AdapterRegistry()
         adapters.register(FakeAdapter())
@@ -103,11 +107,18 @@ def build_app(
             # The wall clock, not the monotonic default: the adapter stores readings in the session ref,
             # which must stay meaningful after a restart.
             adapters.register(JulesAdapter(jules_key, clock=clock, pr_head=pr_head))
+        if os.environ.get("CODEX_API_KEY"):
+            codex_entries = [rc.agents["codex"] for rc in repo_configs.values() if "codex" in rc.agents]
+            enabled = [entry for entry in codex_entries if entry.enabled]
+            if enabled or not codex_entries:
+                codex_cfg = CodexAgentConfig(**(enabled or [AgentConfig()])[0].model_dump())
+                adapters.register(
+                    CodexAdapter(workspaces=WorktreeManager(cfg.worktrees_dir), gh=client, config=codex_cfg)
+                )
 
     backend = review_backend if review_backend is not None else ClaudeSdkBackend()
     executors = default_registry(review_backend=backend)
     outbox = Outbox(store, client, clock=clock, sleep=sleep)
-    repo_configs = _stored_repo_configs(store, cfg)
     runner = Runner(
         store,
         outbox,

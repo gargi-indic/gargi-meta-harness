@@ -1,0 +1,4 @@
+{"thread_id": "codex_123", "event": "start"}
+{"event": "message", "text": "I am looking at the code."}
+{"event": "message", "text": "{\"summary\": \"Plan summary\", \"steps\": [{\"title\": \"Step 1\", \"files\": [\"foo.py\"], \"notes\": \"Change this\"}], \"risks\": [\"None\"], \"questions\": [\"Any question?\"]}"}
+{"event": "done"}
