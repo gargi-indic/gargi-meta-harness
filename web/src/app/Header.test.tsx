@@ -1,11 +1,13 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { describe, it, expect, afterEach } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Header } from './Header';
 import { mockApi } from '../test/fetchMock';
 
 describe('Header', () => {
+  afterEach(cleanup);
+
   it('toggles menu and active links', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     mockApi({
@@ -42,5 +44,32 @@ describe('Header', () => {
     fireEvent.click(boardLink);
     expect(menuBtn).toHaveAttribute('aria-expanded', 'false');
     expect(nav).toHaveAttribute('data-open', 'false');
+  });
+
+  function renderWithHealth(demo: boolean) {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const fetchMock = mockApi({
+      'GET /api/health': () => ({ status: 200, json: { status: 'ok', version: '0', repo_count: 1, demo } })
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/inbox']}>
+          <Header />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    return fetchMock;
+  }
+
+  it('shows the DEMO DATA tag when health.demo is true', async () => {
+    renderWithHealth(true);
+    expect(await screen.findByText('DEMO DATA')).toBeInTheDocument();
+  });
+
+  it('does not show the DEMO DATA tag when health.demo is false', async () => {
+    const fetchMock = renderWithHealth(false);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() => expect(fetchMock.mock.results[0].value).resolves.toBeDefined());
+    expect(screen.queryByText('DEMO DATA')).not.toBeInTheDocument();
   });
 });

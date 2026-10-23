@@ -2,13 +2,13 @@
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 import harness
@@ -39,6 +39,8 @@ def create_app(
     gh: GitHub | None = None,
     builtin_dir: Path | None = None,
     clock: Callable[[], datetime] | None = None,
+    demo: bool = False,
+    extra_routers: Sequence[APIRouter] = (),
 ) -> FastAPI:
     token = token if token is not None else generate_token()
     port = port if port is not None else config.port
@@ -84,7 +86,7 @@ def create_app(
 
     @app.get("/api/health")
     async def health(cfg: Annotated[GlobalConfig, Depends(get_config)]) -> dict[str, Any]:
-        return {"status": "ok", "version": __version__, "repo_count": len(cfg.repos)}
+        return {"status": "ok", "version": __version__, "repo_count": len(cfg.repos), "demo": demo}
 
     @app.get("/api/events")
     async def events(request: Request, event_bus: Annotated[EventBus, Depends(get_bus)]) -> StreamingResponse:
@@ -96,7 +98,7 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    for router in api_routers():
+    for router in [*api_routers(), *extra_routers]:
         app.include_router(router)
 
     @app.api_route("/api", methods=_ALL_METHODS, include_in_schema=False)

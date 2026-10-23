@@ -59,6 +59,22 @@ export function useInvalidateOnEvents() {
   });
 }
 
+export interface Health {
+  status: string;
+  version: string;
+  repo_count: number;
+  demo: boolean;
+}
+
+export function useHealth() {
+  return useQuery<Health>({
+    queryKey: ["health"],
+    queryFn: () => apiGet('/api/health'),
+    staleTime: Infinity,
+    retry: false,
+  });
+}
+
 export function useCampaigns() {
   return useQuery<CampaignSummary[]>({
     queryKey: queryKeys.campaigns,

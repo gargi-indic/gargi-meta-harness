@@ -36,8 +36,10 @@ export function computeOverlay(
 
     if (step.status === 'running') status = 'running';
     else if (step.status === 'waiting') {
-      const isGate = playbook?.nodes[node]?.kind === 'gate';
-      status = isGate ? 'needs-you' : 'waiting';
+      // The engine parks every polling step (agent, check, merge) as `waiting`; only a gate or an escalation
+      // is actually waiting on a person, anything else is live work.
+      const kind = playbook?.nodes[node]?.kind;
+      status = kind === 'gate' || kind === 'escalate' ? 'needs-you' : 'running';
     }
     else if (step.status === 'done') status = 'done';
     else if (step.status === 'failed') status = 'failed';

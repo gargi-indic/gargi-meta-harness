@@ -1,0 +1,6 @@
+
+/* Gate summaries carry long unbroken commands; wrap them instead of widening the page. */
+.inbox-item-summary pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

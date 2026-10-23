@@ -33,4 +33,14 @@ describe('computeOverlay', () => {
     expect(overlay['gate_node']).toEqual({ status: 'needs-you', visits: 1 });
     expect(overlay['exhausted_node']).toEqual({ status: 'done', visits: 2, badge: 'EXHAUSTED' });
   });
+
+  it('shows a polling (waiting) agent step as running and a waiting escalation as needs-you', () => {
+    const playbook: any = { nodes: { work: { kind: 'agent' }, stuck: { kind: 'escalate' } } };
+    const step = (id: string, node: string): StepOut => ({
+      id, node, visit: 1, status: 'waiting', outcome: null, ref: null, started_at: null, finished_at: null,
+    });
+    const overlay = computeOverlay([step('1', 'work'), step('2', 'stuck')], playbook);
+    expect(overlay['work'].status).toBe('running');
+    expect(overlay['stuck'].status).toBe('needs-you');
+  });
 });

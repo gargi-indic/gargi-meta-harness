@@ -56,6 +56,7 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     height = "100%",
   } = props;
 
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [layoutPositions, setLayoutPositions] = useState<Record<string, { x: number; y: number }>>({});
   const { fitView } = useReactFlow();
 
@@ -118,8 +119,11 @@ function FlowCanvasInner(props: FlowCanvasProps) {
         color: "var(--ink)",
       },
       animated: false, // never animated per spec
+      // Edges are controlled (no onEdgesChange), so the selection a click makes must be fed back in; it is what
+      // lets Backspace/Delete remove an edge in edit mode.
+      selected: e.id === selectedEdgeId,
     }));
-  }, [edges]);
+  }, [edges, selectedEdgeId]);
 
   const handleConnect = useCallback((connection: Connection) => {
     if (mode === "edit" && onConnect) {
@@ -134,10 +138,16 @@ function FlowCanvasInner(props: FlowCanvasProps) {
   // Selection is driven by user clicks only; reacting to onSelectionChange would echo the controlled
   // `selectedId` prop back to the parent and can loop (select -> deselect -> select ...).
   const handleNodeClick = useCallback((_event: React.MouseEvent, node: ReactFlowNode) => {
+    setSelectedEdgeId(null);
     onSelect?.(node.id);
   }, [onSelect]);
 
+  const handleEdgeClick = useCallback((_event: React.MouseEvent, edge: Edge) => {
+    setSelectedEdgeId(edge.id);
+  }, []);
+
   const handlePaneClick = useCallback(() => {
+    setSelectedEdgeId(null);
     onSelect?.(null);
   }, [onSelect]);
 
@@ -168,6 +178,7 @@ function FlowCanvasInner(props: FlowCanvasProps) {
         edgeTypes={edgeTypes}
         onConnect={handleConnect}
         onNodeClick={handleNodeClick as any}
+        onEdgeClick={handleEdgeClick}
         onPaneClick={handlePaneClick}
         onNodesDelete={handleNodesDelete}
         onEdgesDelete={handleEdgesDelete}
