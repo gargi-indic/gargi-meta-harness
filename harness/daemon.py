@@ -12,10 +12,14 @@ from collections.abc import Awaitable, Callable
 
 from harness.app import App
 from harness.config import RepoConfig
+from harness.dag import ready_set
+from harness.engine.dispatcher import Dispatcher
+from harness.engine.model import TERMINAL_STATUSES
 from harness.github.commands import poll_commands
 from harness.lock import Lock, LockHeld, acquire, heartbeat, iso, release
+from harness.playbook.models import Playbook
 from harness.secrets import redact
-from harness.store.repo import append_event, get_repo
+from harness.store.repo import IssueRow, append_event, get_repo, list_issues, list_runs
 from harness.sync import sync_repo
 
 
@@ -124,6 +128,7 @@ async def run_daemon(
     commands_every: float = 30,
     heartbeat_every: float = 60,
     idle: float = 1.0,
+    dispatch_every: float | None = None,
 ) -> None:
     """Run until ``stop`` is set. Raises :class:`LockHeld` (having started nothing) if a repo is locked."""
     locks: dict[str, Lock] = {}
@@ -157,6 +162,22 @@ async def run_daemon(
                     _every(app, stop, "sync", sync_every, _sync_job(app, repo), first=False, repo=repo)
                 )
             )
+        if dispatch_every is not None:
+            for entry in app.cfg.repos:
+                repo_name = entry.name
+                tasks.append(
+                    asyncio.create_task(
+                        _every(
+                            app,
+                            stop,
+                            "dispatch",
+                            dispatch_every,
+                            _dispatch_job(app, repo_name),
+                            first=True,
+                            repo=repo_name,
+                        )
+                    )
+                )
         for repo, lock in locks.items():
             tasks.append(
                 asyncio.create_task(
@@ -216,5 +237,30 @@ def _heartbeat_job(app: App, stop: asyncio.Event, repo: str, lock: Lock) -> Call
             )
             stop.set()  # somebody forced the lock away: stop acting on this repo (and the rest)
             return None
+
+    return job
+
+
+def _dispatch_job(app: App, repo: str) -> Callable[[], Awaitable[object]]:
+    async def job() -> object:
+        config = app.repo_configs.get(repo) or RepoConfig()
+        caps = {name: agent.max_concurrency for name, agent in config.agents.items() if agent.enabled}
+        dispatcher = Dispatcher(store=app.store, caps=caps)
+
+        async def ready_provider() -> list[IssueRow]:
+            issues = list_issues(app.store, repo)
+            running_issues = {
+                r.issue for r in list_runs(app.store) if r.repo == repo and r.status not in TERMINAL_STATUSES
+            }
+            ready_numbers = set(ready_set(issues, running_issues, config.escalate.labels))
+            return [i for i in issues if i.number in ready_numbers]
+
+        async def resolve_playbook(repo_name: str, playbook_id: str) -> tuple[Playbook, str | None]:
+            # Imported here: harness.cli imports this module, so a top-level import would be a cycle.
+            from harness.cli import _resolve_playbook
+
+            return await _resolve_playbook(app, repo_name, playbook_id, None)
+
+        return await dispatcher.tick(app.runner, ready_provider, resolve_playbook)
 
     return job
