@@ -50,7 +50,7 @@ async def setup_git(tmp_path: Path):
 
 @pytest.fixture
 async def wt_manager(setup_git):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     root = tmp_path / "worktrees"
     return WorktreeManager(root)
 
@@ -62,7 +62,7 @@ def github():
 
 @pytest.mark.asyncio
 async def test_publish_no_changes(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     respx_mock.get("https://api.github.com/repos/owner/repo/pulls").mock(
@@ -82,7 +82,7 @@ async def test_publish_no_changes(wt_manager, setup_git, github, respx_mock):
 
 @pytest.mark.asyncio
 async def test_publish_happy_path(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     (wt.path / "new_file.txt").write_text("hello world")
@@ -134,7 +134,7 @@ async def test_publish_happy_path(wt_manager, setup_git, github, respx_mock):
 
 @pytest.mark.asyncio
 async def test_publish_idempotent_double(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     (wt.path / "file1.txt").write_text("hello")
@@ -172,7 +172,7 @@ async def test_publish_idempotent_double(wt_manager, setup_git, github, respx_mo
 
 @pytest.mark.asyncio
 async def test_protected_path_violation(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     (wt.path / ".harness").mkdir()
@@ -198,7 +198,7 @@ async def test_protected_path_violation(wt_manager, setup_git, github, respx_moc
 
 @pytest.mark.asyncio
 async def test_wrong_branch(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
     import dataclasses
 
@@ -217,7 +217,7 @@ async def test_wrong_branch(wt_manager, setup_git, github, respx_mock):
 
 @pytest.mark.asyncio
 async def test_push_revision(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     (wt.path / "file1.txt").write_text("hello")
@@ -238,7 +238,7 @@ async def test_push_revision(wt_manager, setup_git, github, respx_mock):
 
 @pytest.mark.asyncio
 async def test_token_redaction(wt_manager, setup_git, github, respx_mock, caplog):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     import dataclasses
@@ -273,7 +273,7 @@ async def test_token_redaction(wt_manager, setup_git, github, respx_mock, caplog
 
 @pytest.mark.asyncio
 async def test_publish_draft_passthrough(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     (wt.path / "file1.txt").write_text("hello")
@@ -295,7 +295,7 @@ async def test_publish_draft_passthrough(wt_manager, setup_git, github, respx_mo
 
 @pytest.mark.asyncio
 async def test_push_revision_protected_path(wt_manager, setup_git, github):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     import subprocess
@@ -320,7 +320,7 @@ async def test_push_revision_protected_path(wt_manager, setup_git, github):
 
 @pytest.mark.asyncio
 async def test_push_revision_no_changes(wt_manager, setup_git, github):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     with pytest.raises(PublishError) as exc:
@@ -331,7 +331,7 @@ async def test_push_revision_no_changes(wt_manager, setup_git, github):
 
 @pytest.mark.asyncio
 async def test_publish_delete_protected_path(wt_manager, setup_git, github, respx_mock):
-    tmp_path, remote, _ = setup_git
+    tmp_path, remote, env = setup_git
     wt = await wt_manager.create(repo="owner/repo", clone_url=remote, issue=1, slug="slug", base="main")
 
     (wt.path / ".harness").mkdir()
@@ -340,7 +340,7 @@ async def test_publish_delete_protected_path(wt_manager, setup_git, github, resp
     import subprocess
 
     subprocess.run(["git", "add", ".harness/tracked.txt"], cwd=wt.path, check=True)
-    subprocess.run(["git", "commit", "-m", "add protected"], cwd=wt.path, check=True)
+    subprocess.run(["git", "commit", "-m", "add protected"], cwd=wt.path, check=True, env=env)
     subprocess.run(["git", "push", "origin", "harness/1-slug:harness/1-slug"], cwd=wt.path, check=True)
 
     (wt.path / ".harness/tracked.txt").unlink()
