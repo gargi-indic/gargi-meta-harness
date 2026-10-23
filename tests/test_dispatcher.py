@@ -1,20 +1,38 @@
 import pytest
 from pydantic import BaseModel
 
+from harness.adapters.base import AdapterRegistry
+from harness.adapters.fake import FakeAdapter
 from harness.config import RepoConfig
 from harness.engine.dispatcher import (
     Dispatcher,
     _paths_overlap,
     parse_path_hints,
 )
+from harness.engine.executors import default_registry
 from harness.engine.runner import Runner
+from harness.github.client import GitHub
+from harness.github.outbox import Outbox
+from harness.llm.backend import FakeBackend
 from harness.store.db import Store
-from harness.store.repo import IssueRow, RunRow, upsert_repo
+from harness.store.repo import IssueRow, RunRow, list_runs, upsert_issue, upsert_repo
 
 
 class FakePlaybook(BaseModel):
     id: str = "fake"
     nodes: dict = {"entry": {}}
+
+
+def fake_runner(store: Store) -> Runner:
+    adapters = AdapterRegistry()
+    adapters.register(FakeAdapter())
+    return Runner(
+        store,
+        Outbox(store, GitHub("token")),
+        default_registry(review_backend=FakeBackend({})),
+        adapters,
+        repo_configs={"test/repo": RepoConfig()},
+    )
 
 
 def test_parse_path_hints():
@@ -95,8 +113,7 @@ def test_plan_agent_cap():
 
     decisions = dispatcher.plan(ready, active)
 
-    # Jules is at cap, both ready issues should be skipped due to cap if default is jules
-    # Default agent in empty repo config is jules (actually default in RepoConfig is "jules")
+    # RepoConfig's default agent is jules, which is at its cap.
     assert len(decisions) == 2
     for d in decisions:
         assert d.reason == "cap"
@@ -118,19 +135,12 @@ def test_plan_ordering_and_overlap():
     store = setup_store()
     dispatcher = Dispatcher(store=store, caps={"claude": 5})
 
-    # 1 has priority:1, 2 has no priority
-    # 3 has priority:2
     ready = [
         issue_row(2, body="paths: src/", labels=["agent:claude"]),
-        issue_row(3, labels=["priority:2", "agent:claude"], body="paths: src/x.py", blocked_by=[]),  # Depth 1
-        issue_row(1, labels=["priority:1", "agent:claude"], body="paths: src/y.py", blocked_by=[]),  # Depth 0
+        issue_row(3, labels=["priority:2", "agent:claude"], body="paths: src/x.py", blocked_by=[]),
+        issue_row(1, labels=["priority:1", "agent:claude"], body="paths: src/y.py", blocked_by=[]),
     ]
-    # Order should be:
-    # issue 1: priority=1, depth=0, number=1
-    # issue 3: priority=2, depth=1, number=3
-    # issue 2: priority=100, depth=0, number=2
-    # But wait, issue 2 overlaps with issue 1 (src/ overlap src/y.py)? No, issue 2 is "src/", issue 1 is "src/y.py".
-    # Yes, prefix overlap.
+    # Order: #1 (priority 1), #3 (priority 2), #2 (no priority); #2's "src/" overlaps the earlier #1.
 
     decisions = dispatcher.plan(ready, [])
     assert decisions[0].issue == 1
@@ -140,7 +150,7 @@ def test_plan_ordering_and_overlap():
     assert decisions[1].reason == "started"
 
     assert decisions[2].issue == 2
-    assert decisions[2].reason == "overlap:#1"  # Or #3, but #1 selected first
+    assert decisions[2].reason == "overlap:#1"
 
 
 def test_mixed_agents():
@@ -167,23 +177,7 @@ def test_mixed_agents():
 async def test_tick_with_fakes():
     store = setup_store()
 
-    from harness.adapters.base import AdapterRegistry
-    from harness.adapters.fake import FakeAdapter
-    from harness.engine.executors import default_registry
-    from harness.github.client import GitHub
-    from harness.github.outbox import Outbox
-    from harness.llm.backend import FakeBackend
-
-    adapters = AdapterRegistry()
-    adapters.register(FakeAdapter())
-
-    runner = Runner(
-        store,
-        Outbox(store, GitHub("token")),
-        default_registry(review_backend=FakeBackend({})),
-        adapters,
-        repo_configs={"test/repo": RepoConfig()},
-    )
+    runner = fake_runner(store)
 
     dispatcher = Dispatcher(store=store, caps={"fake": 2})
 
@@ -205,19 +199,20 @@ async def test_tick_with_fakes():
 
     # Idempotent tick
     await dispatcher.tick(runner, ready_provider, resolve_playbook)
-    # the ready_provider returned 1,2,3 again. Since 1 and 2 are active, they might be in active set.
-    # Actually wait: ready provider usually filters out running issues. But we returned them.
-    # The dispatcher plan will see them as active, and they will consume caps.
-    pass
+    assert sorted(r.issue for r in list_runs(store)) == [1, 2]  # no duplicates
+
+    # One run finishes: the third issue starts, the others are not started again.
+    store.execute("UPDATE runs SET status = 'done' WHERE issue = 1")
+    issues.pop(0)  # a real ready set no longer contains the finished issue
+    decisions = await dispatcher.tick(runner, ready_provider, resolve_playbook)
+    assert sorted(r.issue for r in list_runs(store)) == [1, 2, 3]
+    assert {d.issue: d.reason for d in decisions}[3] == "started"
 
 
 def test_blocked_and_running_skipped():
     store = setup_store()
     dispatcher = Dispatcher(store=store, caps={"claude": 5})
 
-    from harness.store.repo import upsert_issue
-
-    # Create issue 99 as open
     upsert_issue(store, issue_row(99))
     upsert_issue(
         store,
@@ -242,7 +237,6 @@ def test_blocked_and_running_skipped():
         issue_row(4, labels=["agent:claude"]),  # running
     ]
 
-    # Actually we just pass ready to plan.
     decisions = dispatcher.plan(ready, [run_row(4, "claude")])
 
     reasons = {d.issue: d.reason for d in decisions}
@@ -250,3 +244,31 @@ def test_blocked_and_running_skipped():
     assert reasons[2] == "started"
     assert reasons[3] == "blocked"
     assert reasons[4] == "running"
+
+
+def test_restart_safety_counts_active_runs_from_rows_only():
+    dispatcher = Dispatcher(store=setup_store(), caps={"jules": 1})
+
+    decisions = dispatcher.plan([issue_row(2, labels=["agent:jules"])], [run_row(1, "jules")])
+
+    assert [(d.issue, d.reason) for d in decisions] == [(2, "cap")]
+
+
+@pytest.mark.asyncio
+async def test_blocked_issue_is_reported_and_never_started_by_tick():
+    store = setup_store()
+    upsert_issue(store, issue_row(10))  # open blocker
+    blocked_issue = issue_row(11, labels=["agent:fake"], blocked_by=[10])
+    runner = fake_runner(store)
+    dispatcher = Dispatcher(store=store, caps={"fake": 2})
+
+    async def ready_provider():
+        return [blocked_issue]
+
+    async def resolve_playbook(repo, p_id):
+        return FakePlaybook(), "sha"
+
+    decisions = await dispatcher.tick(runner, ready_provider, resolve_playbook)
+
+    assert [(d.issue, d.reason) for d in decisions] == [(11, "blocked")]
+    assert list_runs(store) == []

@@ -14,10 +14,12 @@ from harness.app import App
 from harness.config import RepoConfig
 from harness.dag import ready_set
 from harness.engine.dispatcher import Dispatcher
+from harness.engine.model import TERMINAL_STATUSES
 from harness.github.commands import poll_commands
 from harness.lock import Lock, LockHeld, acquire, heartbeat, iso, release
+from harness.playbook.models import Playbook
 from harness.secrets import redact
-from harness.store.repo import append_event, get_repo, list_issues, list_runs
+from harness.store.repo import IssueRow, append_event, get_repo, list_issues, list_runs
 from harness.sync import sync_repo
 
 
@@ -241,24 +243,23 @@ def _heartbeat_job(app: App, stop: asyncio.Event, repo: str, lock: Lock) -> Call
 
 def _dispatch_job(app: App, repo: str) -> Callable[[], Awaitable[object]]:
     async def job() -> object:
-        caps = {name: cfg.max_concurrency for name, cfg in app.cfg.agents.items() if cfg.enabled}
-        global_cap = getattr(app.cfg, "global_cap", None)
-        dispatcher = Dispatcher(store=app.store, caps=caps, global_cap=global_cap, clock=app.clock)
+        config = app.repo_configs.get(repo) or RepoConfig()
+        caps = {name: agent.max_concurrency for name, agent in config.agents.items() if agent.enabled}
+        dispatcher = Dispatcher(store=app.store, caps=caps)
 
-        async def ready_provider():
+        async def ready_provider() -> list[IssueRow]:
             issues = list_issues(app.store, repo)
-            runs = list_runs(app.store)
-            running_issues = {r.issue for r in runs if r.status == "running" and r.repo == repo}
-            config = app.repo_configs.get(repo) or RepoConfig()
-            escalate_labels = config.escalate.labels if config.escalate else ["needs-discussion"]
+            running_issues = {
+                r.issue for r in list_runs(app.store) if r.repo == repo and r.status not in TERMINAL_STATUSES
+            }
+            ready_numbers = set(ready_set(issues, running_issues, config.escalate.labels))
+            return [i for i in issues if i.number in ready_numbers]
 
-            ready_nums = ready_set(issues, running_issues, escalate_labels)
-            return [i for i in issues if i.number in ready_nums]
-
-        async def resolve_playbook(r: str, p_id: str):
+        async def resolve_playbook(repo_name: str, playbook_id: str) -> tuple[Playbook, str | None]:
+            # Imported here: harness.cli imports this module, so a top-level import would be a cycle.
             from harness.cli import _resolve_playbook
 
-            return await _resolve_playbook(app, r, p_id, None)
+            return await _resolve_playbook(app, repo_name, playbook_id, None)
 
         return await dispatcher.tick(app.runner, ready_provider, resolve_playbook)
 
