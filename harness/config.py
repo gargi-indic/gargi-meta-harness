@@ -42,6 +42,11 @@ class GlobalConfig(BaseModel):
         return self.data_dir.expanduser()
 
     @property
+    def worktrees_dir(self) -> Path:
+        """Where :class:`harness.workspaces.WorktreeManager` keeps its caches and worktrees."""
+        return self.data_path / "worktrees"
+
+    @property
     def db_path(self) -> Path:
         return self.data_path / "harness.db"
 
