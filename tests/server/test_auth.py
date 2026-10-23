@@ -18,7 +18,7 @@ async def test_health_requires_the_cookie() -> None:
         assert wrong.json() == {"detail": "unauthorized"}
         ok = await client.get("/api/health", headers=COOKIE)
     assert ok.status_code == 200
-    assert ok.json() == {"status": "ok", "version": __version__, "repo_count": 2}
+    assert ok.json() == {"status": "ok", "version": __version__, "repo_count": 2, "demo": False}
 
 
 async def test_unknown_api_path_is_404_after_auth() -> None:

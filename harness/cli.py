@@ -797,11 +797,46 @@ def _serve_github(store: Store) -> tuple[GitHub | None, str | None]:
     return GitHub(token=token, cache=SqliteEtagCache(store)), token
 
 
+def _serve_demo(port: int | None, no_open: bool) -> None:
+    """``serve --demo``: refuse when real repos and a GitHub token are configured, else serve the demo app."""
+    import webbrowser
+
+    from harness.server.demo import create_demo_app
+    from harness.server.runner import HarnessServer
+
+    cfg = load_global()
+    load_env_files(cfg.env_files)
+    if cfg.repos:
+        try:
+            github_token()
+        except RuntimeError:
+            pass
+        else:
+            print(
+                "refusing to start --demo: a GitHub token and real repos are configured. "
+                "Demo mode is only for an environment with neither (use another GARGI_HARNESS_CONFIG).",
+            )
+            raise typer.Exit(1)
+    listen_port = port if port is not None else 8799
+    web, token = create_demo_app(port=listen_port)
+    url = f"http://127.0.0.1:{listen_port}/auth?token={token}"
+
+    def announce() -> None:
+        print(url, flush=True)
+        if not no_open:
+            webbrowser.open(url)
+
+    HarnessServer(build_server_config(web, listen_port), bus=web.state.bus, on_started=announce).run()
+
+
 @app.command()
 def serve(
     port: int = typer.Option(None, "--port", help="Port to listen on (default: the global config port)."),
     no_open: bool = typer.Option(False, "--no-open", help="Print the login URL without opening a browser."),
     with_daemon: bool = typer.Option(False, "--with-daemon", help="Not implemented yet."),
+    demo: bool = typer.Option(
+        False, "--demo", help="Serve seeded in-memory demo data: no network, no token file, no real repos."
+    ),
 ) -> None:
     """Serve the local web UI on 127.0.0.1 and print the one-time login URL."""
     import webbrowser
@@ -814,6 +849,9 @@ def serve(
     if with_daemon:
         print("--with-daemon is not implemented yet; run `harness daemon` separately")
         raise typer.Exit(2)
+    if demo:
+        _serve_demo(port, no_open)
+        return
     cfg = load_global()
     load_env_files(cfg.env_files)
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)

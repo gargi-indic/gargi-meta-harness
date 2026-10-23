@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
+import { useHealth } from '../api/queries';
+import { StatusTag } from '../ui/StatusTag';
 
 export function Header() {
   const [open, setOpen] = useState(false);
+  const { data: health } = useHealth();
 
   return (
     <header className="header">
       <div className="header-inner">
         <div className="logo">GARGI HARNESS</div>
+        {health?.demo && <StatusTag tone="muted">DEMO DATA</StatusTag>}
         <button
           className="menu-btn"
           aria-expanded={open}
