@@ -7,6 +7,7 @@ from pathlib import Path
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
+from harness.planner.proposal import proposal_json_schema  # noqa: E402
 from harness.playbook.models import (  # noqa: E402
     AgentNode,
     BranchNode,
@@ -86,21 +87,29 @@ def main() -> None:
 
     cases_file = repo_root / "web" / "src" / "generated" / "ports.cases.json"
 
+    proposal_json = json.dumps(proposal_json_schema(), indent=2) + "\n"
+    proposal_file = repo_root / "web" / "src" / "generated" / "proposal.schema.json"
+
     if "--check" in sys.argv:
-        if not out_file.exists() or not cases_file.exists():
+        if not out_file.exists() or not cases_file.exists() or not proposal_file.exists():
             print("Schema or cases file missing")
             sys.exit(1)
         current = out_file.read_text()
         current_cases = cases_file.read_text()
 
-        if current != schema_json or current_cases != cases_json:
+        if (
+            current != schema_json
+            or current_cases != cases_json
+            or proposal_file.read_text() != proposal_json
+        ):
             print("Schema files are out of date. Run 'uv run python scripts/export_playbook_schema.py'")
             sys.exit(1)
         print("Schema is up to date.")
     else:
         out_file.write_text(schema_json)
         cases_file.write_text(cases_json)
-        print(f"Wrote {out_file} and {cases_file}")
+        proposal_file.write_text(proposal_json)
+        print(f"Wrote {out_file}, {cases_file} and {proposal_file}")
 
 
 if __name__ == "__main__":
