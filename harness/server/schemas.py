@@ -191,3 +191,37 @@ class CostsSummary(Schema):
         description="USD spent per adapter (the reviewer is listed as 'reviewer')."
     )
     by_run: list[RunCostRow] = Field(description="USD spent per run, highest first.")
+
+
+class HaltInfoOut(Schema):
+    reason: str = Field(description="Reason for halt: 'kill_switch' or 'daily_budget'.")
+    since: str = Field(description="When the halt was activated (ISO 8601 UTC).")
+    by: str = Field(description="User or system that activated the halt.")
+
+
+class BudgetStatusOut(Schema):
+    limit_usd: float | None = Field(description="Current daily limit, or null if none.")
+    spent_usd: float = Field(description="USD spent since the last reset.")
+    remaining_usd: float | None = Field(description="Remaining budget, or null if no limit.")
+    resets_at: str = Field(description="When the budget resets (ISO 8601 UTC).")
+    exceeded: bool = Field(description="True when spent >= limit.")
+    unknown_cost_runs: int = Field(description="Number of runs started today with no reported costs.")
+
+
+class OpsStatusOut(Schema):
+    halted: HaltInfoOut | None = Field(description="Halt info, or null if the system is running.")
+    budget: BudgetStatusOut = Field(description="Status of the global daily budget.")
+
+
+class KillRequest(Schema):
+    confirm: str = Field(description="Must be exactly the string 'KILL'.")
+
+
+class KillReportOut(Schema):
+    errors: list[list[str]] = Field(
+        description="List of [run_id, error_message] pairs for sessions that failed to cancel."
+    )
+
+
+class BudgetRequest(Schema):
+    daily_usd: float | None = Field(description="New daily limit in USD, or null to clear.", ge=0)

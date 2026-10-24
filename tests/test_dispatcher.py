@@ -272,3 +272,30 @@ async def test_blocked_issue_is_reported_and_never_started_by_tick():
 
     assert [(d.issue, d.reason) for d in decisions] == [(11, "blocked")]
     assert list_runs(store) == []
+
+
+def test_plan_gated_by_start_gate():
+    store = setup_store()
+
+    class MockGate:
+        def __init__(self, reason: str | None):
+            self._reason = reason
+
+        def reason(self) -> str | None:
+            return self._reason
+
+    dispatcher_halted = Dispatcher(store=store, caps={"claude": 5}, gate=MockGate("halted"))
+
+    ready = [issue_row(1, labels=["agent:claude"]), issue_row(2, labels=["agent:claude"])]
+    decisions = dispatcher_halted.plan(ready, [])
+
+    assert decisions[0].reason == "halted"
+    assert decisions[1].reason == "halted"
+
+    dispatcher_budget = Dispatcher(store=store, caps={"claude": 5}, gate=MockGate("daily_budget"))
+    decisions_budget = dispatcher_budget.plan(ready, [])
+    assert decisions_budget[0].reason == "daily_budget"
+
+    dispatcher_open = Dispatcher(store=store, caps={"claude": 5}, gate=MockGate(None))
+    decisions_open = dispatcher_open.plan(ready, [])
+    assert decisions_open[0].reason == "started"
