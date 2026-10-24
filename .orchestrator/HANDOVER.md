@@ -39,19 +39,20 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | Built by Jules via this orchestrator (one session at a time); the orchestrator merges after review | human |
 | 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
-## State (Handover 2026-10-23, end of seventh orchestrator session)
+## State (Handover 2026-10-24, end of seventh orchestrator session)
 **Done:**
-- **M0, M1, M2:** complete (epics #2, #10, #22 closed).
-- **M3 (epic #33) merged:** #34 worktree manager (PR #91), #35 commit/push/PR helper + `harness/scope.py` (PR #92), #36 protected-path guard (PR #93), #39 dispatcher (PR #94), #38 Codex adapter (PR #95), #37 Claude adapter (PR #96). Jules built #35, #38, #39; Sonnet built #34, #36, #37 and did the fix rounds for #38, #39. `main` CI is green.
-- **Binding specs:** `.orchestrator/specs/` m23..m39.
+- **M0, M1, M2, M3:** complete (epics #2, #10, #22, #33 closed).
+- **M3 merged:** #34 (PR #91), #35 (#92), #36 (#93), #39 (#94), #38 (#95), #37 (#96), #40 (#97), #41 (#98), #42 (#99). Jules built #35, #38, #39; Sonnet built #34, #36, #37, #40, #41, #42 and did the fix rounds. `main` CI is green (1407 tests, web checks).
+- **Binding specs:** `.orchestrator/specs/` m23..m42.
 
 **Waiting on the human:**
-- **#40 M3.7 parallel/join is `needs-discussion`.** The escalation is on issue #1 (comment starting `**2026-10-23 · #39 merged; #40 needs a decision`). The issue's proposed default: keep one step per (node, visit); a `parallel` node completes with outcome `fork` and the runner schedules every target as independent steps in the same run; a `join` step stays `waiting` until its arrival condition is met (counted per `fork_id`). Do not start #40, #41, #42 until the human answers "accept default" or gives an alternative. #41 and #42 are blocked behind #40.
-- Then M4 (#43), M5 (#51). #44, #52, #53 are also `needs-discussion`.
+- **#44 M4.1 plan gate is `needs-discussion`.** Escalation is on issue #1 (comment `**2026-10-24 · #42 merged; Epic #33 (M3) complete`). Issue's proposed default: approved when EITHER the label `harness:plan-approved` is on the control issue (set by repo owner/allowlisted user) OR the PR that last modified the plan doc is merged; bound to the plan doc blob sha, stale if the doc changes. Do not start #44 or #50 until the human answers "accept default" or an alternative.
+- **M4 not started.** The M4 build-order table is in the #1 body (#44 ⛔, #45-#50 ⏳). #45 (decomposer), #47 (issue creation) and #46 do not depend on #44; only #50 does. Ask the human whether to proceed with #45 before the decision on #44.
+- M5 (#51): #52, #53 are also `needs-discussion`.
 
-**Running:** nothing. No Jules session is open, no background wait, no cron job should be relied on.
+**Running:** nothing. No Jules session, no background wait, no cron job.
 
 ## How to Resume
-1. Boot per the skill (section 0): `gh` only via `bash -ic '...'`; `gh issue view` is broken, use `gh api`; read #1.
-2. Check whether the human replied on #1 or #40 (a comment not starting with `**20`). If they accepted the default, write a binding spec to `.orchestrator/specs/m40-parallel-join.txt` (multiple active steps per run; fork_id; join all/any; select raises NotImplementedError until M3.8; existing runner tests unchanged), start #40 on Jules, and approve its plan within 3 minutes. Consider a Sonnet subagent directly: Jules stalled on 4 of the last 6 tasks.
-3. After #40: #41 (join select), #42 (branch + tournament.yaml). Then close epic #33 and add the M4 table to #1.
+1. Boot per the skill (section 0 and 7): `gh` only via `bash -ic '...'`; `gh issue view` is broken, use `gh api`; the orchestrator's comments are posted from the human's account, so a human reply is a comment NOT starting with `**20`.
+2. Read #1 and check for the human's answer on #44 (and whether to start #45).
+3. Jules stalled on 4 of the last 6 tasks: for new tasks write the binding spec first (facts verified against `git show origin/main:<path>`; the issue texts are partly stale), then delegate to a Sonnet subagent with a fresh scratchpad clone, or use Jules only with plan polling every 2-3 minutes. Review every PR with `gh pr view --json files` and the diff before merging; check for stray root files and for pre-existing test edits.
