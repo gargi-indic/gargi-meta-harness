@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from harness.playbook.models import Playbook
+from harness.playbook.models import JoinNode, Playbook
 
 
 @dataclass
@@ -8,6 +8,31 @@ class PlaybookIssue:
     path: str
     code: str
     message: str
+    severity: str = "error"
+
+
+def _join_sources(pb: Playbook, join_id: str, node: JoinNode) -> list[str]:
+    """The nodes a join waits for: explicit ``inputs``, else every node with an edge into it."""
+    if node.inputs:
+        return list(dict.fromkeys(node.inputs))
+    found: list[str] = []
+    for key, target in pb.edges.items():
+        source = key.rsplit(".", 1)[0]
+        if target == join_id and source != "*" and source not in found:
+            found.append(source)
+    return found
+
+
+def _reachable_joins(pb: Playbook, adj: dict[str, list[str]], start: str) -> set[str]:
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        curr = stack.pop()
+        if curr in seen:
+            continue
+        seen.add(curr)
+        stack.extend(adj.get(curr, []))
+    return {n for n in seen if pb.nodes[n].kind == "join"}
 
 
 def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> list[PlaybookIssue]:
@@ -99,6 +124,36 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
                         PlaybookIssue(f"nodes.{node_id}.inputs", "unknown_branch", f"Unknown node {inp}")
                     )
 
+        if node.kind == "join":
+            if node.mode == "select":
+                issues.append(
+                    PlaybookIssue(
+                        f"nodes.{node_id}.mode",
+                        "join_select_not_implemented",
+                        "join mode 'select' is not implemented yet (planned in M3.8); the join step will fail",
+                        severity="warning",
+                    )
+                )
+            sources = _join_sources(pb, node_id, node)
+            if all(src in pb.nodes for src in sources) and len(sources) < 2:
+                issues.append(
+                    PlaybookIssue(
+                        f"nodes.{node_id}",
+                        "join_min_inputs",
+                        f"Join {node_id} needs at least 2 incoming edges or inputs, found {len(sources)}",
+                    )
+                )
+
+        if node.kind == "parallel" and all(b in pb.nodes for b in node.branches):
+            if len(node.branches) < 2:
+                issues.append(
+                    PlaybookIssue(
+                        f"nodes.{node_id}.branches",
+                        "parallel_min_targets",
+                        f"Parallel {node_id} needs at least 2 branches, found {len(node.branches)}",
+                    )
+                )
+
     # Wildcard checks against all known ports
     all_ports = set()
     for node in pb.nodes.values():
@@ -124,6 +179,20 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
             target = routes.get(node_id, {}).get(port, wildcards.get(port))
             if target and target in pb.nodes:
                 adj[node_id].append(target)
+
+    # Every branch of a parallel must reach one common join.
+    for node_id, node in pb.nodes.items():
+        if node.kind != "parallel" or len(node.branches) < 2 or any(b not in pb.nodes for b in node.branches):
+            continue
+        per_branch = [_reachable_joins(pb, adj, b) for b in node.branches]
+        if not set.intersection(*per_branch):
+            issues.append(
+                PlaybookIssue(
+                    f"nodes.{node_id}.branches",
+                    "branch_not_joined",
+                    f"The branches of parallel {node_id} do not all reach the same join",
+                )
+            )
 
     # Reachability from entry (first node)
     entry_node = next(iter(pb.nodes.keys()))
@@ -178,6 +247,17 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
                                 if w == curr:
                                     break
                             if len(scc) > 1 or (len(scc) == 1 and scc[0] in adj.get(scc[0], [])):
+                                if any(pb.nodes[n].kind == "parallel" for n in scc) and all(
+                                    pb.nodes[n].max_visits is None for n in scc
+                                ):
+                                    issues.append(
+                                        PlaybookIssue(
+                                            f"nodes.{scc[0]}",
+                                            "parallel_cycle_without_max_visits",
+                                            "A cycle containing a parallel node needs max_visits on a node of the cycle: "
+                                            + ", ".join(sorted(scc)),
+                                        )
+                                    )
                                 for node_id in scc:
                                     if pb.nodes[node_id].max_visits is None:
                                         issues.append(

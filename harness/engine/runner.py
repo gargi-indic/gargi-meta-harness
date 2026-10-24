@@ -621,7 +621,9 @@ class Runner:
                 error = redact(f"{type(exc).__name__}: {exc}")
                 result = Done("failed", {"error": error, "correction": f"Executor error: {error}"})
         self._crash("after_advance")
-        self._commit(run_id, step_id, playbook, node, result, error)
+        siblings = self._failed_all_join_siblings(run_id, playbook, step, node, result)
+        cancel_errors = await self._cancel_sessions(siblings)
+        self._commit(run_id, step_id, playbook, node, result, error, siblings, cancel_errors)
         self._crash("after_mirror")
         return True
 
@@ -633,6 +635,8 @@ class Runner:
         node: Node | None,
         result: Waiting | Done | None,
         error: str | None,
+        siblings: list[StepRow] | None = None,
+        cancel_errors: list[tuple[str, str]] | None = None,
     ) -> None:
         with self.store.tx():
             run = get_run(self.store, run_id)
@@ -650,6 +654,25 @@ class Runner:
             elif isinstance(result, Waiting):
                 mirror = self._commit_waiting(work, step, node, result)
             else:
+                for sibling in siblings or []:
+                    # A branch that finished while the adapter was being cancelled keeps its own result.
+                    current = next((s for s in steps_for_run(self.store, run_id) if s.id == sibling.id), None)
+                    if current is not None and current.status in ("pending", "running", "waiting"):
+                        update_step(
+                            self.store,
+                            sibling.id,
+                            status="failed",
+                            outcome="cancelled",
+                            poll_after=None,
+                            ended_at=self.store.now(),
+                        )
+                        self._event(
+                            run,
+                            "step_cancelled",
+                            {"step": sibling.id, "reason": "join failed", "join": step.id},
+                        )
+                for failed_id, message in cancel_errors or []:
+                    self._event(run, "cancel_error", {"step": failed_id, "error": message})
                 self._commit_done(work, step, node, result, error)
             if mirror:
                 self._finalize(work, prev_status)
@@ -865,12 +888,10 @@ class Runner:
             self._event(run, "retry", {"node": node_id, "visit": visits[node_id]})
             self._finalize(work, run.status)
 
-    async def cancel(self, run_id: str) -> None:
-        run = self._load_active(run_id)
-        if run.status in TERMINAL_STATUSES:
-            return
+    async def _cancel_sessions(self, steps: list[StepRow]) -> list[tuple[str, str]]:
+        """Cancel the adapter session of every waiting step that has one; returns (step id, error) failures."""
         errors: list[tuple[str, str]] = []
-        for step in steps_for_run(self.store, run_id):
+        for step in steps:
             ref = step.ref
             if step.status != "waiting" or not isinstance(ref, dict) or "agent" not in ref or "id" not in ref:
                 continue
@@ -879,6 +900,28 @@ class Runner:
                 await self.adapters.get(ref["agent"]).cancel(session)
             except Exception as exc:
                 errors.append((step.id, redact(f"{type(exc).__name__}: {exc}")))
+        return errors
+
+    def _failed_all_join_siblings(
+        self, run_id: str, playbook: Playbook, step: StepRow, node: Node | None, result: Waiting | Done | None
+    ) -> list[StepRow]:
+        """Still-active branch steps to cancel when a ``mode: all`` join has just failed."""
+        if not (isinstance(node, JoinNode) and node.mode == "all" and isinstance(result, Done)):
+            return []
+        if result.outcome != "failed":
+            return []
+        inputs = set(join_inputs(playbook, step.node_id, node))
+        return [
+            s
+            for s in steps_for_run(self.store, run_id)
+            if s.node_id in inputs and s.status in ("pending", "running", "waiting")
+        ]
+
+    async def cancel(self, run_id: str) -> None:
+        run = self._load_active(run_id)
+        if run.status in TERMINAL_STATUSES:
+            return
+        errors = await self._cancel_sessions(steps_for_run(self.store, run_id))
         with self.store.tx():
             run = self._load_active(run_id)
             if run.status in TERMINAL_STATUSES:
