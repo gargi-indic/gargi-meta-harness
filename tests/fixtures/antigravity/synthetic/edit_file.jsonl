@@ -1,0 +1,5 @@
+{"synthetic": true, "type": "conversation", "conversation_id": "conv-synthetic-2"}
+{"type": "tool_call", "tool": "edit_file", "path": "a.txt"}
+{"type": "tool_result", "tool": "edit_file", "text": "ok"}
+{"type": "future_event", "detail": 1}
+{"type": "result", "text": "edited"}

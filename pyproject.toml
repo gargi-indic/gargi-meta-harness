@@ -47,3 +47,4 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["agy_live: calls the real agy CLI; skipped unless AGY_LIVE=1"]

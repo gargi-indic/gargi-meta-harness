@@ -1,0 +1,4 @@
+{"synthetic": true, "type": "conversation", "conversation_id": "conv-synthetic-3"}
+{"type": "tool_call", "tool": "run_shell"}
+{"type": "denied_tool", "tool": "run_shell", "text": "not auto-approved"}
+{"type": "error", "text": "tool denied"}
