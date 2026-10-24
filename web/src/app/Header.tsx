@@ -26,6 +26,7 @@ export function Header() {
           <NavLink to="/inbox" onClick={() => setOpen(false)}>Inbox</NavLink>
           <NavLink to="/runs" onClick={() => setOpen(false)}>Runs</NavLink>
           <NavLink to="/playbooks" onClick={() => setOpen(false)}>Playbooks</NavLink>
+          <NavLink to="/planner" onClick={() => setOpen(false)}>Planner</NavLink>
         </nav>
       </div>
     </header>

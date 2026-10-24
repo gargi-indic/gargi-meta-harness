@@ -1,0 +1,305 @@
+.planner-page {
+  padding: 24px 48px 48px;
+  min-width: 0;
+}
+
+.planner-head {
+  border-bottom: 2px solid var(--line);
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+}
+
+.planner-title {
+  font-size: 30px;
+  line-height: 1.04;
+}
+
+.planner-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 12rem) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.planner-controls > .planner-wide,
+.planner-controls > .planner-actions,
+.planner-controls > .planner-status,
+.planner-controls > .planner-blockers,
+.planner-controls > .field-error,
+.planner-controls > .planner-created {
+  grid-column: 1 / -1;
+}
+
+.planner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.planner-status {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.planner-blockers {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.planner-created {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+  font-size: 12px;
+}
+
+.planner-created p {
+  margin: 0 0 4px;
+}
+
+.planner-created ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.planner-created a {
+  color: var(--ink);
+}
+
+.planner-created a:hover {
+  color: var(--accent);
+}
+
+.planner-zones {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.6fr) minmax(0, 1.1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.planner-zone {
+  min-width: 0;
+}
+
+.planner-zone-title {
+  font-size: 22px;
+}
+
+.planner-canvas-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-bottom: 2px solid var(--line);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.planner-canvas-bar .btn {
+  margin-left: auto;
+}
+
+.planner-canvas {
+  height: 520px;
+  border: 2px solid var(--line);
+  min-width: 0;
+}
+
+.planner-conflict {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--accent);
+  border: 2px solid var(--accent);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.planner-zone .panel > div {
+  padding: 16px;
+  min-width: 0;
+}
+
+.planner-zone .panel .panel-title {
+  font-size: 22px;
+}
+
+.planner-zone .panel + .panel {
+  margin-top: 16px;
+}
+
+/* Plan preview: reading width 65ch */
+.plan-preview-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.plan-preview-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+.plan-reading {
+  max-width: 65ch;
+  color: var(--ink-2);
+}
+
+.plan-block + .plan-block {
+  margin-top: 16px;
+}
+
+.plan-heading {
+  font-size: 18px;
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+
+.plan-heading--1 {
+  font-size: 24px;
+}
+
+.plan-text {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Inspector */
+.planner-epic {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+.planner-inspector-body,
+.planner-inspector-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.planner-key {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.planner-inspector .field-input,
+.planner-controls .field-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.planner-fieldset {
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  padding: 8px 0 0;
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.planner-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  min-height: 44px;
+}
+
+.ac-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ac-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ac-line,
+.ac-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ac-num {
+  width: 2ch;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ac-input {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.ac-row .btn {
+  padding: 4px 8px;
+  font-size: 13px;
+  min-height: 44px;
+}
+
+.planner-check input {
+  accent-color: var(--accent);
+}
+
+.ac-row .btn {
+  padding: 4px 8px;
+  font-size: 13px;
+  min-height: 44px;
+}
+
+.planner-node {
+  width: 240px;
+}
+
+.planner-node .node-card-label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@media (max-width: 1100px) {
+  .planner-page {
+    padding: 24px 24px 48px;
+  }
+}
+
+@media (max-width: 859px) {
+  .planner-page {
+    padding: 16px;
+  }
+
+  .planner-controls,
+  .planner-zones {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .planner-canvas {
+    height: 420px;
+  }
+}

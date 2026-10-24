@@ -33,7 +33,9 @@ from harness.playbook.load import builtin_playbooks
 from harness.playbook.models import Node
 from harness.server.app import create_app
 from harness.server.auth import generate_token
+from harness.server.demo_planner import DEMO_AGENT_CAPS, DemoBackend, DemoPlannerHub
 from harness.server.demo_seed import REPO, Seed, seed_config, seed_store
+from harness.server.planner_service import PlannerService
 from harness.server.static import default_web_dist
 from harness.store.db import Store
 from harness.store.repo import IssueRow, StepRow, get_issue
@@ -225,6 +227,11 @@ def _demo_router() -> APIRouter:
         driver: DemoDriver = request.app.state.driver
         return {"run_id": driver.start_run()}
 
+    @router.get("/planner-issues", summary="Issues the demo planner created in its GitHub (demo mode only)")
+    async def planner_issues(request: Request) -> list[dict[str, Any]]:
+        hub: DemoPlannerHub = request.app.state.demo_planner_hub
+        return hub.created()
+
     return router
 
 
@@ -237,6 +244,15 @@ def create_demo_app(
     store.migrate()
     seed: Seed = seed_store(store)
     gh = DemoGitHub()
+    hub = DemoPlannerHub()
+    planner = PlannerService(
+        store=store,
+        gh=GitHub("demo", transport=hub, write_spacing=0.0),
+        config=seed_config(),
+        backend=DemoBackend(),
+        agent_caps=DEMO_AGENT_CAPS,
+    )
+    planner.outbox.per_minute = 10_000  # the demo GitHub has no rate limit
     app = create_app(
         store=store,
         config=seed_config(),
@@ -246,8 +262,10 @@ def create_demo_app(
         gh=cast(GitHub, gh),
         demo=True,
         extra_routers=[_demo_router()],
+        planner=planner,
     )
     app.state.driver = DemoDriver(store, interval_s=interval_s)
     app.state.demo_gh = gh
+    app.state.demo_planner_hub = hub
     app.state.seed = seed
     return app, token

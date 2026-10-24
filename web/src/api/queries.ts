@@ -25,7 +25,8 @@ export const queryKeys = {
   campaigns: ["campaigns"],
   graph: (id: string) => ["campaigns", id, "graph"],
   board: (campaign?: string) => ["board", campaign ?? null],
-  agents: (repo: string) => ["agents", repo]
+  agents: (repo: string) => ["agents", repo],
+  planner: ["planner"]
 };
 
 export function useInvalidateOnEvents() {
@@ -54,6 +55,9 @@ export function useInvalidateOnEvents() {
         queryClient.invalidateQueries({ queryKey: queryKeys.issues });
         queryClient.invalidateQueries({ queryKey: queryKeys.campaigns });
         queryClient.invalidateQueries({ queryKey: ["board"] });
+        break;
+      case 'planner.updated':
+        queryClient.invalidateQueries({ queryKey: queryKeys.planner });
         break;
     }
   });
