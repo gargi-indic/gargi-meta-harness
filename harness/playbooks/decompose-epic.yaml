@@ -1,0 +1,32 @@
+apiVersion: harness/v1
+id: decompose-epic
+name: Decompose an epic
+description: Reads the plan document, proposes an epic with sub-issues, waits for the plan to be approved (label, merged PR or CLI), then creates the issues with their dependencies so the dispatcher can pick them up. Run it on the epic or control issue; the plan comes from the run inputs (plan_path, default docs/PLAN.md).
+gates:
+  plan: human
+limits:
+  budget_usd: 10
+  timeout: 2h
+# The plan gate reads the same inputs as the decompose nodes; `--input plan_path=...` overrides the default.
+inputs:
+  plan_path: docs/PLAN.md
+nodes:
+  # A rejected plan comes back here once: the rejection message (`prev.correction`) goes to the decomposer as guidance.
+  decompose:  {kind: decompose, plan: "{{ inputs.plan_path | default('docs/PLAN.md') }}", guidance: "{% if prev and prev.correction %}The previous proposal was rejected: {{ prev.correction }}{% endif %}", create: false, max_visits: 2}
+  plan_gate:  {kind: gate, gate: plan, scope: campaign, max_visits: 3}
+  # Reuses the stored proposal of the same plan sha (no second model call) and creates the issues.
+  create:     {kind: decompose, plan: "{{ inputs.plan_path | default('docs/PLAN.md') }}", create: true}
+  notify:     {kind: notify, message: "Created {{ create.created.issues | length }} issues under epic #{{ create.created.epic_number }} for #{{ issue.number }}"}
+  escalate:   {kind: escalate}
+edges:
+  decompose.proposed: plan_gate
+  plan_gate.approved: create
+  plan_gate.rejected: decompose
+  create.created: notify
+  # `create` only ends in `created`, `invalid` or `failed`; `proposed` must still be routed.
+  create.proposed: escalate
+  notify.sent: "@done"
+  escalate.resolved: "@done"
+  "*.invalid": escalate
+  "*.exhausted": escalate
+  "*.failed": escalate
