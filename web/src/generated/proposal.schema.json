@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "ProposedIssue": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,40}$",
+          "title": "Key",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "acceptance": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Acceptance",
+          "type": "array"
+        },
+        "blocked_by": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocked By",
+          "type": "array"
+        },
+        "agent": {
+          "title": "Agent",
+          "type": "string"
+        },
+        "playbook": {
+          "title": "Playbook",
+          "type": "string"
+        },
+        "paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        },
+        "labels": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Labels",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "title",
+        "body",
+        "acceptance",
+        "blocked_by",
+        "agent",
+        "playbook"
+      ],
+      "title": "ProposedIssue",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "epic_title": {
+      "title": "Epic Title",
+      "type": "string"
+    },
+    "epic_body": {
+      "title": "Epic Body",
+      "type": "string"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/ProposedIssue"
+      },
+      "minItems": 1,
+      "title": "Issues",
+      "type": "array"
+    },
+    "notes": {
+      "default": "",
+      "title": "Notes",
+      "type": "string"
+    }
+  },
+  "required": [
+    "epic_title",
+    "epic_body",
+    "issues"
+  ],
+  "title": "ProposedPlan",
+  "type": "object"
+}
