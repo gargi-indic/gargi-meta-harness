@@ -24,6 +24,14 @@ class AgentState(StrEnum):
     FAILED = "FAILED"
 
 
+class UnsupportedOperation(NotImplementedError):
+    """The adapter's agent has no such operation (for example ``approve_plan`` on an agent with no plan step)."""
+
+
+class AdapterConfigError(Exception):
+    """The adapter cannot work with its configuration or credentials (for example the wrong kind of token)."""
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

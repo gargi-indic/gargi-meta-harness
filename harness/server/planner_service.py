@@ -90,12 +90,14 @@ RETRY_FLUSH_AFTER_S = 10.0
 PLAYBOOK_TTL_S = 30.0
 
 # The capabilities of the agents the harness knows, for a server that has no adapter registry (the daemon owns
-# that). They mirror ``harness.adapters.{jules,claude,codex}``; ``max_concurrency`` comes from the repo config.
+# that). They mirror ``harness.adapters.{jules,claude,codex,copilot}``; ``max_concurrency`` comes from the repo config.
 # Like the daemon, the server offers an agent only when its key is in the environment.
 KNOWN_AGENT_CAPS: dict[str, Capabilities] = {
     "jules": Capabilities(plan_approval=True, messaging=True, opens_pr=True, local_workspace=False),
     "claude": Capabilities(plan_approval=True, messaging=True, opens_pr=False, local_workspace=True),
     "codex": Capabilities(plan_approval=True, messaging=True, opens_pr=False, local_workspace=True),
+    # Not in ``_AGENT_KEYS``: Copilot is opt-in through ``agents.copilot`` in a repo config, not an env key.
+    "copilot": Capabilities(plan_approval=False, messaging=True, opens_pr=True, local_workspace=False),
 }
 
 _AGENT_KEYS = {"jules": "JULES_API_KEY", "claude": "ANTHROPIC_API_KEY", "codex": "CODEX_API_KEY"}

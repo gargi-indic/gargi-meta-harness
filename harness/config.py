@@ -4,10 +4,10 @@ import re
 import tomllib
 from datetime import time
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SerializeAsAny, field_validator
 
 from harness.ops.pricing import ModelPrice
 
@@ -176,6 +176,15 @@ class AgentConfig(BaseModel):
     model: str | None = None
 
 
+def _typed_agent_entries(value: Any) -> Any:
+    """Parse the ``copilot`` entry with its own config class, which has fields that ``AgentConfig`` forbids."""
+    if isinstance(value, dict) and isinstance(value.get("copilot"), dict):
+        from harness.adapters.copilot import CopilotAgentConfig  # local import: copilot imports this module
+
+        return {**value, "copilot": CopilotAgentConfig(**value["copilot"])}
+    return value
+
+
 class EscalateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     labels: list[str] = Field(default_factory=lambda: ["needs-discussion"])
@@ -195,7 +204,9 @@ class RepoConfig(BaseModel):
     default_agent: str = "jules"
     base_branch: str | None = None
     context_files: list[str] = Field(default_factory=list)
-    agents: dict[str, AgentConfig] = Field(default_factory=lambda: {"jules": AgentConfig()})
+    agents: Annotated[dict[str, SerializeAsAny[AgentConfig]], BeforeValidator(_typed_agent_entries)] = Field(
+        default_factory=lambda: {"jules": AgentConfig()}
+    )
     protected_paths: list[str] = Field(default_factory=lambda: [".harness/", ".claude/", ".orchestrator/"])
     escalate: EscalateConfig = Field(default_factory=EscalateConfig)
     merge: MergeConfig = Field(default_factory=MergeConfig)
