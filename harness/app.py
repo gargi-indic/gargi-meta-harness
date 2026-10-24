@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from harness.adapters.base import AdapterRegistry
+from harness.adapters.claude import ClaudeAdapter, ClaudeAgentConfig
 from harness.adapters.codex import CodexAdapter, CodexAgentConfig
 from harness.adapters.fake import FakeAdapter
 from harness.adapters.jules import JulesAdapter
@@ -114,6 +115,15 @@ def build_app(
                 codex_cfg = CodexAgentConfig(**(enabled or [AgentConfig()])[0].model_dump())
                 adapters.register(
                     CodexAdapter(workspaces=WorktreeManager(cfg.worktrees_dir), gh=client, config=codex_cfg)
+                )
+
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            claude_entries = [rc.agents["claude"] for rc in repo_configs.values() if "claude" in rc.agents]
+            claude_enabled = [entry for entry in claude_entries if entry.enabled]
+            if claude_enabled or not claude_entries:
+                claude_cfg = ClaudeAgentConfig(**(claude_enabled or [AgentConfig()])[0].model_dump())
+                adapters.register(
+                    ClaudeAdapter(workspaces=WorktreeManager(cfg.worktrees_dir), gh=client, config=claude_cfg)
                 )
 
     backend = review_backend if review_backend is not None else ClaudeSdkBackend()
