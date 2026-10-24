@@ -186,6 +186,24 @@
     "node": {
       "title": null,
       "max_visits": null,
+      "kind": "branch",
+      "cases": [
+        {
+          "when": "a",
+          "port": "a"
+        }
+      ],
+      "default": null
+    },
+    "ports": [
+      "a",
+      "failed"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": null,
       "kind": "parallel",
       "branches": [
         "a"

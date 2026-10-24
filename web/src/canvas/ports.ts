@@ -25,7 +25,7 @@ export function portsFor(node: PlaybookNode): string[] {
       ports = ["approved", "rejected"];
       break;
     case "branch":
-      ports = node.cases.map(c => c.port).concat(node.default);
+      ports = [...new Set([...node.cases.map(c => c.port), node.default ?? "failed"])];
       break;
     case "parallel":
       ports = [];

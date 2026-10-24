@@ -114,11 +114,13 @@ class BranchCase(BaseModel):
 class BranchNode(NodeBase):
     kind: Literal["branch"] = "branch"
     cases: list[BranchCase]
-    default: str
+    # Port taken when no case matches. Without it, no match ends the node with outcome ``failed``.
+    default: str | None = None
 
     def ports(self) -> tuple[str, ...]:
-        p = tuple([c.port for c in self.cases] + [self.default])
-        return self._add_exhausted(p)
+        ports = [c.port for c in self.cases]
+        ports.append(self.default if self.default is not None else "failed")
+        return self._add_exhausted(tuple(dict.fromkeys(ports)))
 
 
 class ParallelNode(NodeBase):

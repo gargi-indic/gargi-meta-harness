@@ -14,4 +14,6 @@ class BranchExecutor(Executor):
             if is_match:
                 return Done(case.port, {"port": case.port})
 
+        if node.default is None:
+            return Done("failed", {"error": f"branch {step.node_id}: no case matched and no default is set"})
         return Done(node.default, {"port": node.default})

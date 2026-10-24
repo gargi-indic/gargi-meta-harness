@@ -1,0 +1,53 @@
+apiVersion: harness/v1
+id: tournament
+name: Tournament
+description: Claude and Codex implement the same issue in parallel, a judge picks one PR and closes the other, then CI, scope and PR review gate the winner and a human approves the merge. Runs two agents per issue, so it costs about twice as much.
+gates:
+  plan: auto
+  merge: human
+limits:
+  budget_usd: 40
+  timeout: 8h
+nodes:
+  fork:       {kind: parallel, branches: [a, b]}
+  a:          {kind: agent, session: a, action: implement, agent: claude}
+  b:          {kind: agent, session: b, action: implement, agent: codex}
+  pick:       {kind: join, mode: select, rubric: [acceptance, scope, tests, smallest-diff]}
+  ci:         {kind: check, check: ci, max_visits: 5}
+  scope:      {kind: check, check: scope, max_visits: 5}
+  pr_review:  {kind: review, target: pr, checklist: [acceptance, scope, pinned-versions], max_visits: 4}
+  # Continues the winner's session: `session` and `agent` are templates over the join output (`pick.winner` is
+  # the node id of the winning branch, which is also its session slot).
+  fix:        {kind: agent, session: "{{ pick.winner }}", action: revise, expect: pr, agent: "{{ 'claude' if pick.winner == 'a' else 'codex' }}", message: "{{ prev.correction }}", max_visits: 3}
+  merge_gate: {kind: gate, gate: merge, max_visits: 3}
+  merge:      {kind: merge, method: squash}
+  escalate:   {kind: escalate}
+edges:
+  # A branch that ends without a PR (failed, needs input, timed out) is routed into the join, which drops it.
+  # Routing it to `escalate` instead would end the run while the other branch is still working.
+  # With no candidate left, `pick.failed` escalates.
+  a.pr_ready: pick
+  a.failed: pick
+  a.needs_input: pick
+  a.timeout: pick
+  b.pr_ready: pick
+  b.failed: pick
+  b.needs_input: pick
+  b.timeout: pick
+  pick.done: ci
+  ci.pass: scope
+  ci.fail: fix
+  scope.pass: pr_review
+  scope.fail: fix
+  pr_review.approve: merge_gate
+  pr_review.changes: fix
+  fix.pr_ready: ci
+  merge_gate.approved: merge
+  merge_gate.rejected: fix
+  merge.merged: "@done"
+  escalate.resolved: "@done"
+  "*.escalate": escalate
+  "*.exhausted": escalate
+  "*.failed": escalate
+  "*.needs_input": escalate
+  "*.timeout": escalate

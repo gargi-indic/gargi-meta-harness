@@ -310,7 +310,7 @@ class Runner:
 
     def _record_session(self, work: _Work, node: Node | None, ref: dict[str, Any] | None) -> None:
         slot = getattr(node, "session", None)
-        if slot and isinstance(ref, dict) and "agent" in ref and "id" in ref:
+        if slot and "{{" not in slot and isinstance(ref, dict) and "agent" in ref and "id" in ref:
             work.ctx.setdefault("sessions", {})[slot] = {
                 k: ref[k] for k in ("agent", "id", "url", "data") if k in ref
             }

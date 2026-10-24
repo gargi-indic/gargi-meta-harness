@@ -51,6 +51,8 @@ def build_ports_cases():
     # branch
     add(BranchNode(cases=[{"when": "a", "port": "a"}, {"when": "b", "port": "b"}], default="c"))
 
+    add(BranchNode(cases=[{"when": "a", "port": "a"}]))
+
     # parallel
     add(ParallelNode(branches=["a"]))
 

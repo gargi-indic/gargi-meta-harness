@@ -53,7 +53,7 @@ def mock_repo_files(router, *, files=("repo-flow.yaml", "broken.yml")):
 async def test_builtins_are_listed(client) -> None:
     response = await client.get("/api/playbooks")
     assert response.status_code == 200
-    assert response.json() == [BUILTIN]
+    assert response.json() == [BUILTIN, TOURNAMENT]
 
 
 async def test_builtin_files_come_from_the_injected_dir_sorted_by_id(tmp_path: Path) -> None:
@@ -83,6 +83,7 @@ BROKEN = {
     "sha": "sha-2",
     "valid": False,
 }
+TOURNAMENT = {**BUILTIN, "id": "tournament", "path": "playbooks/tournament.yaml"}
 REPO_FLOW = {
     "id": "repo-flow",
     "source": "repo",
@@ -97,7 +98,7 @@ async def test_repo_playbooks_come_through_the_contents_api(client, respx_mock) 
     response = await client.get("/api/playbooks", params={"repo": REPO})
     assert response.status_code == 200
     # Built-ins first, then the repo's by id; non-YAML files and directories are skipped.
-    assert response.json() == [BUILTIN, BROKEN, REPO_FLOW]
+    assert response.json() == [BUILTIN, TOURNAMENT, BROKEN, REPO_FLOW]
 
 
 async def test_a_second_request_revalidates_with_the_etag(respx_mock) -> None:
@@ -118,7 +119,7 @@ async def test_a_second_request_revalidates_with_the_etag(respx_mock) -> None:
         first = await client.get("/api/playbooks", params={"repo": REPO})
         second = await client.get("/api/playbooks", params={"repo": REPO})
     assert first.status_code == second.status_code == 200
-    assert first.json() == second.json() == [BUILTIN, REPO_FLOW]
+    assert first.json() == second.json() == [BUILTIN, TOURNAMENT, REPO_FLOW]
     assert seen == [None, None, '"dir-1"', '"file-1"']
 
 
@@ -140,7 +141,7 @@ async def test_the_server_cache_is_the_sqlite_etag_cache(respx_mock) -> None:
     respx_mock.get(DIR).mock(side_effect=handler)
     async with playbook_client(app) as client:
         for _ in range(2):
-            assert (await client.get("/api/playbooks", params={"repo": REPO})).json() == [BUILTIN]
+            assert (await client.get("/api/playbooks", params={"repo": REPO})).json() == [BUILTIN, TOURNAMENT]
     assert calls == [None, '"e"']
     assert app.state.store.query("SELECT COUNT(*) AS n FROM http_cache")[0]["n"] == 1
 
@@ -148,7 +149,7 @@ async def test_the_server_cache_is_the_sqlite_etag_cache(respx_mock) -> None:
 async def test_a_missing_playbooks_directory_lists_only_the_builtins(client, respx_mock) -> None:
     respx_mock.get(DIR).mock(return_value=Response(404, json={"message": "Not Found"}))
     response = await client.get("/api/playbooks", params={"repo": REPO})
-    assert response.json() == [BUILTIN]
+    assert response.json() == [BUILTIN, TOURNAMENT]
 
 
 async def test_listing_errors(client, respx_mock) -> None:

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from harness.playbook.models import JoinNode, Playbook
+from harness.playbook.templating import TemplateError, check_expression
 
 
 @dataclass
@@ -107,6 +108,19 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
                             f"nodes.{node_id}.action",
                             "capability",
                             f"Agent {node.agent} missing capability 'message'",
+                        )
+                    )
+
+        if node.kind == "branch":
+            for i, case in enumerate(node.cases):
+                try:
+                    check_expression(case.when)
+                except TemplateError as e:
+                    issues.append(
+                        PlaybookIssue(
+                            f"nodes.{node_id}.cases[{i}].when",
+                            "bad_expression",
+                            f"Node {node_id}: invalid expression in case {i}: {e.message}",
                         )
                     )
 

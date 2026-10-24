@@ -30,7 +30,9 @@ class AgentExecutor(Executor):
 
         agent_name = render(node.agent, ctx.template, path=f"nodes.{step.node_id}.agent")
         adapter = ctx.adapters.get(agent_name)
-        key = f"{ctx.run.id}/{node.session}"
+        # ``session`` may be a template (``{{ pick.winner }}``): a node after a join continues the winner's session.
+        slot = render(node.session, ctx.template, path=f"nodes.{step.node_id}.session")
+        key = f"{ctx.run.id}/{slot}"
 
         ref = dict(step.ref) if step.ref else {}
 
@@ -169,7 +171,7 @@ class AgentExecutor(Executor):
 
         elif node.action == "revise":
             if not session:
-                return Done("failed", {"error": f"no session for slot {node.session}"})
+                return Done("failed", {"error": f"no session for slot {slot}"})
 
             msg = render(node.message, ctx.template, path=f"nodes.{step.node_id}.message")
             if not msg.strip():
