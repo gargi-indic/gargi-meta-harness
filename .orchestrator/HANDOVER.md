@@ -39,56 +39,19 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 | 2026-10-14 | Built by Jules via this orchestrator (one session at a time); the orchestrator merges after review | human |
 | 2026-10-14 | When Jules is stuck, hand the task to a Sonnet subagent (same branch, same review) instead of escalating | human |
 
-## State (Handover 2026-10-20, end of sixth orchestrator session)
+## State (Handover 2026-10-23, end of seventh orchestrator session)
 **Done:**
-- **M0 and M1:** complete (epics #2, #10 closed).
-- **M2 merged:**
+- **M0, M1, M2:** complete (epics #2, #10, #22 closed).
+- **M3 (epic #33) merged:** #34 worktree manager (PR #91), #35 commit/push/PR helper + `harness/scope.py` (PR #92), #36 protected-path guard (PR #93), #39 dispatcher (PR #94), #38 Codex adapter (PR #95), #37 Claude adapter (PR #96). Jules built #35, #38, #39; Sonnet built #34, #36, #37 and did the fix rounds for #38, #39. `main` CI is green.
+- **Binding specs:** `.orchestrator/specs/` m23..m39.
 
-  | Task | PR | Commit | Built by | Fix rounds |
-  |---|---|---|---|---|
-  | #23 server skeleton | #81 | `d5344d5` | Sonnet | 1 |
-  | #24 read API | #82 | `cc39768` | Sonnet | 1 |
-  | #26 web scaffold | #83 | `ffd7760` | Jules | 2, then a Sonnet pin fix |
-  | #25 action API | #84 | `0cb0473` | Sonnet | 1 |
-  | #30 playbook API | #85 | `fbfc9ef` | Sonnet | 1 |
-  | #27 canvas | #86 | `48d5ec4` | Jules | 1 |
-  | #28 screens (campaigns/board/inbox) | #87 | `7632bf6` | Jules | 1 |
-  | #29 run view | #88 | `ef61d1d` | Jules | 1 |
+**Waiting on the human:**
+- **#40 M3.7 parallel/join is `needs-discussion`.** The escalation is on issue #1 (comment starting `**2026-10-23 · #39 merged; #40 needs a decision`). The issue's proposed default: keep one step per (node, visit); a `parallel` node completes with outcome `fork` and the runner schedules every target as independent steps in the same run; a `join` step stays `waiting` until its arrival condition is met (counted per `fork_id`). Do not start #40, #41, #42 until the human answers "accept default" or gives an alternative. #41 and #42 are blocked behind #40.
+- Then M4 (#43), M5 (#51). #44, #52, #53 are also `needs-discussion`.
 
-  `main` CI is completely green (python lint & unit tests, and `web` job).
-- **Binding specs:** `specs/m23..m27`, `m28-screens.txt`, `m29-run-view.txt`, `m30-playbook-api.txt`, `m31-playbook-editor.txt`.
+**Running:** nothing. No Jules session is open, no background wait, no cron job should be relied on.
 
-**Running / In Progress:**
-- **#31 M2.9 Playbook Editor on Jules**, session `9885139017106979480`.
-  - Session URL: https://jules.google.com/session/9885139017106979480
-  - State: `IN_PROGRESS` (resumed at `03:49:20Z`).
-  - Plan was approved with binding spec `.orchestrator/specs/m31-playbook-editor.txt`.
-  - Exact pinned packages `@rjsf/core@6.11.0`, `@rjsf/utils@6.11.0`, `@rjsf/validator-ajv8@6.11.0` were pre-installed and committed to `main` (`1dcc0f6`).
-  - Jules hit a Vitest timeout on `EditorPage.test.tsx` because `POST /api/playbooks/validate` was unmocked (the debounced validator was firing 400ms after render), and `DOMMatrixReadOnly` was missing for React Flow. We messaged the exact fix to Jules, and Jules resumed coding.
-  - **No background wait is left running.**
-
-## How to Resume Tomorrow
-1. Check the session status in WSL:
-   ```bash
-   source ~/.config/jules/env
-   cd /home/gishnum/code/gargi-meta-harness
-   python3 .orchestrator/jules.py get 9885139017106979480
-   ```
-2. If Jules has opened a PR:
-   - Check if the PR created `package.json` / `package-lock.json` at repo root (a known Jules quirk). If so, checkout the PR branch, `git rm package.json package-lock.json`, commit and push to the PR branch.
-   - Run tests locally in WSL: `uv run ruff check .`, `uv run pytest`, and `cd web && npm test && npm run lint && npm run typecheck`.
-   - Verify CI checks: `gh pr checks <pr-number> --watch -R gargi-indic/gargi-meta-harness`.
-   - Squash-merge: `gh pr merge <pr-number> -R gargi-indic/gargi-meta-harness --squash --delete-branch`.
-   - Close & tick issue: `bash .orchestrator/tools/tick.sh 31`.
-   - Archive session: `python3 .orchestrator/jules.py archive 9885139017106979480`.
-   - Pull `main` (`git pull origin main`), update Issue #1 table and comment.
-3. If Jules is still working:
-   - Run the background monitor:
-     ```bash
-     python3 .orchestrator/jules.py wait 9885139017106979480 600
-     ```
-4. **Advance to #32 (M2.10 Demo seed & Playwright smoke test):**
-   - Write binding spec `.orchestrator/specs/m32-demo-smoke.txt`.
-   - Seed data for screens 1-5 (Campaigns, Board, Inbox, Run view, Playbook Editor).
-   - Playwright smoke test covering screens 1-5 in CI.
-   - Merging #32 completes Epic #22!
+## How to Resume
+1. Boot per the skill (section 0): `gh` only via `bash -ic '...'`; `gh issue view` is broken, use `gh api`; read #1.
+2. Check whether the human replied on #1 or #40 (a comment not starting with `**20`). If they accepted the default, write a binding spec to `.orchestrator/specs/m40-parallel-join.txt` (multiple active steps per run; fork_id; join all/any; select raises NotImplementedError until M3.8; existing runner tests unchanged), start #40 on Jules, and approve its plan within 3 minutes. Consider a Sonnet subagent directly: Jules stalled on 4 of the last 6 tasks.
+3. After #40: #41 (join select), #42 (branch + tournament.yaml). Then close epic #33 and add the M4 table to #1.

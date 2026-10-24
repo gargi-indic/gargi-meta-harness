@@ -1,0 +1,23 @@
+Plan approved. These are BINDING decisions that settle the open questions ("Wait..." / "let's look") in your plan; do not reopen them. If something below is impossible, STOP and ask.
+
+FACTS ON main:
+1. Types: use `harness.store.repo.IssueRow` (fields: repo, number, id, title, body, state, labels, parent, blocked_by, updated_at) and `RunRow` (id, repo, issue, playbook_id, playbook_sha, status, context, ...). There is NO `ReadyIssue`/`ActiveRun`: `plan(self, ready: Sequence[IssueRow], active: Sequence[RunRow])`.
+2. Ready set already exists: `harness.dag.ready_set(issues, running: set[int], escalate_labels) -> list[int]` (sorted issue numbers). Reuse it; do not reimplement readiness. `blocked(issues)` exists too.
+3. Starting a run: `Runner.start_run(repo, issue, playbook, *, playbook_sha=None, inputs=None, agent=None) -> run_id` raises `RunExists(run_id)` if a non-terminal run exists (that gives idempotency; catch it and skip). Playbook resolution for the CLI is `harness.cli._resolve_playbook(application, repo, playbook_id, default_branch)` and the label helper `_label_value(labels, "agent:")` in harness/cli.py. Do not duplicate start logic: in dispatcher, `tick` receives an async `resolve_playbook: Callable[[str, str], Awaitable[tuple[Playbook, str | None]]]` (repo? playbook_id -> (playbook, sha)) injected by the caller; the daemon passes a small closure that calls the same code path as the CLI. If `_label_value` is private, import it anyway (same package) or move NOTHING; keep changes to cli.py to zero.
+4. Config: `harness.config.RepoConfig` has `default_playbook` and `default_agent`; `AgentConfig.max_concurrency` (default 1, ge=1) lives in `GlobalConfig.agents`. `caps` = {name: cfg.max_concurrency}.
+5. Active runs per agent: the agent of a run is `run.context["agent"]` (set by start_run); a run is active when `status not in TERMINAL_STATUSES` (import from where the runner/cli get it).
+
+DECISIONS:
+a. DAG depth for ordering = `1 + max(depth(b) for b in blocked_by)` over issues present in the ready/known set, 0 for none; compute with a small private `_depth(issues)` over all open+closed issues passed in. To keep `plan` pure with only `ready` and `active`, ORDER BY `(priority, depth, number)` where depth = `len(issue.blocked_by)` (count of recorded blockers) -- simple, deterministic, no extra input. Do NOT add compute_depth.
+b. Priority label: `priority:<n>` with integer n (lower = sooner); issues without it sort as 100.
+c. `parse_path_hints(body: str | None) -> list[str]`: accept a line `paths: a/b, c/` and/or a `paths:` line followed by `- item` bullets; strip backticks/whitespace; empty list if absent. Overlap(a,b) is true if either is a directory/path prefix of the other (`a/` vs `a/x.py`), or they are equal, or `fnmatch.fnmatchcase` matches either way.
+d. Agent resolution: `agent:` label else repo default; playbook: `playbook:` label else repo default. Unknown agent (not in `caps`) -> decision reason `agent_disabled`.
+e. Reasons strings exactly: `started`, `cap`, `global_cap`, `overlap:#N`, `blocked`, `agent_disabled`, `running`.
+f. `plan` returns decisions for skipped issues too (reason != "started"). `tick` starts only `started` ones. `tick` idempotent via RunExists.
+g. `make_semaphores(caps) -> dict[str, asyncio.Semaphore]` as a plain function; do not wire into runner.
+h. DAEMON: there is no sequential run-start in `harness/daemon.py` today (runs are started by `harness run`). So: add an OPT-IN job. Add a keyword `dispatch_every: float | None = None` to `run_daemon` (default None = off, behaviour unchanged, existing daemon tests unchanged). When set, add a `_every(...)` task named "dispatch" per repo that builds the ready list from the store's issues (use the existing store query helpers, `ready_set`) and calls `Dispatcher.tick`. Add a `--dispatch` flag ONLY IF the daemon CLI command is a trivial place for it; otherwise skip the CLI flag. Do not change defaults.
+i. No `harness next` changes.
+
+TESTS (tests/test_dispatcher.py): all acceptance criteria one-to-one, table-driven for `plan`; FakeAdapter-based `tick` test (caps of 2: two start, third after one finishes, second `tick` makes no duplicates); restart-safety via RunRows only; `parse_path_hints` cases (comma list, bullets, globs, missing). Plus one daemon test that dispatch is off by default.
+
+DO NOT ADD: changes to config.py, runner.py, github client, workspaces.py, publish.py; new dependencies; budgets (M5.6); UI. Search for existing helpers before writing. No package.json/package-lock.json at repo root. Make ruff check, ruff format --check and pytest green and state in your completion message exactly what you ran.

@@ -15,7 +15,13 @@ You are the **conductor** for `gargi-indic/gargi-meta-harness`. You don't write 
 This is the same protocol as gargi-ckg's `gargi-orchestrator` skill. Never run both skills on the same repo.
 
 ## 0. Boot sequence (every time you start)
-Work from `/Applications/code/gargi-meta-harness`. Every relative path below is from the repo root.
+Work from `/home/gishnum/code/gargi-meta-harness` (WSL Ubuntu-24.04). Every relative path below is from the repo root.
+
+**GitHub auth (check first).** `GH_TOKEN` is exported in `~/.bashrc`, but the Bash tool's shell doesn't load it. Run every `gh` command as `bash -ic 'gh ...'` (interactive bash; ignore the "no job control" warning). This works and is the normal route. Only if that also reports "not logged in", run `gh auth status`. If it says "not logged into any GitHub hosts", the human has not yet stored a login for this WSL user. The token files are `~/.config/gh_token_gishnucodes` (the one to use) and `~/.config/gh_token` (unused). Never print or `cat` them, and don't search the home directory for credentials: the permission classifier blocks that.
+- The fix is a one-time login by the human, which stores it in `~/.config/gh` for every later session: `gh auth login --with-token < ~/.config/gh_token_gishnucodes`. The classifier blocks the agent from running it, so ask the human to run it (or to add a Bash permission rule for `gh auth login --with-token*`), then stop until `gh auth status` succeeds.
+- If the human prefers an env var instead: `export GH_TOKEN=$(cat ~/.config/gh_token_gishnucodes)` (their login shell is fish, so use `set -gx GH_TOKEN (cat ...)` in `~/.config/fish/config.fish`).
+- Git pushes go through the Windows Git Credential Manager (`credential.helper` points at a `/mnt/c/...` exe) and need nothing extra.
+- Jules is separate: `~/.config/jules/env` holds `JULES_API_KEY`.
 
 1. Read `.orchestrator/HANDOVER.md`, then `docs/LESSONS.md`.
 2. Read the live state: `gh issue view 1 -R gargi-indic/gargi-meta-harness`, then the latest comments: `gh issue view 1 -R gargi-indic/gargi-meta-harness --comments | tail -120`.
@@ -47,7 +53,7 @@ Run waits with `run_in_background` (they take 5–35 min) and react when they fi
 Build order is **#1's build-order table**, which must respect the `blocked_by` links: only start an issue whose blockers are all closed. Run one Jules session at a time.
 
 1. **Start:** `start <issue>`. Update #1's body (the row and "Current status") and post a log comment.
-2. **Plan review** (`AWAITING_PLAN_APPROVAL`):
+2. **Plan review** (`AWAITING_PLAN_APPROVAL`). **Act within ~3 minutes of `start`:** sessions #34 and #36 went `COMPLETED` with no code when their plan sat unapproved for about 6 minutes (#35, answered within a minute, was fine). Poll every 2–3 minutes until the plan is approved; only then slow down.
    - Approve only if the plan is strictly within the issue's scope, covers every acceptance criterion, matches `docs/PLAN.md` and the recorded decisions, and doesn't reinvent modules already on `main`.
    - Otherwise send a **complete numbered spec** as the correction: files, signatures, versions, tests, and a do-not-add list. Then `wait-reply` and re-review.
 3. **Implementation:** `wait`. Answer `AWAITING_USER_FEEDBACK` from the issue, `docs/PLAN.md` and the decisions. Escalate if those don't cover it.
@@ -90,3 +96,13 @@ This is the human's instruction (2026-10-14). If Jules loops on the same problem
   1. Update `.orchestrator/HANDOVER.md` §State with the active task, session, PR and exact resume step, and commit it (`orchestrator: handover ...`).
   2. Post a #1 comment.
   3. Hand over to a fresh agent: either a new session given the prompt "Use the meta-harness-orchestrator skill and resume", or, if you're told to keep going yourself, a fresh subagent with the same prompt.
+
+## 7. Lessons from M3 (2026-10-23)
+- `gh issue view` fails on the Projects (classic) deprecation: use `gh api repos/gargi-indic/gargi-meta-harness/issues/<n> --jq .body` (and `/comments`). Run all `gh` through `bash -ic '...'`.
+- The orchestrator's comments are posted from the human's `gishnucodes` account, so the author cannot identify a human reply. All orchestrator comments start with `**YYYY-MM-DD ·`; treat a comment on #1 or the task issue as a human reply only if it does not start with `**20`.
+- Jules often stalls or loops: #34 and #36 went COMPLETED with no code after an unapproved plan; #37 ran 85 minutes debugging its own tests; #39 took no push for 34 minutes after a fix request. Jules asks a question and then sits: answer within minutes. After about 60-75 minutes without a PR, or 30 minutes without a push after a fix request, message Jules to stop, archive the session, and hand to a Sonnet subagent (section 4).
+- Jules habitually leaves scratch files at the repo root (`patch_*.py`, `pr_description.md`) and uses regex patch scripts. Tell it in the first spec not to, and check `gh pr view --json files` on every PR.
+- Spec every plan approval with the facts that exist on `main` (real class names such as `GitHub`, helper signatures, the merged adapter as the style reference). Jules's plans reinvent things and use names from the issue text.
+- For local-agent adapters, check that the agent subprocess/SDK env contains no `GH_TOKEN` or other secrets (the SDK merges `options.env` over `os.environ`, so blank them).
+- Sonnet subagents work well for fix rounds on the same branch (give the numbered fix list file, require ruff/pytest tails in the report) and for building a task from scratch when Jules fails.
+- Always verify a subagent's claims against `gh pr view --json files`, `gh pr checks` and the diff before merging.
