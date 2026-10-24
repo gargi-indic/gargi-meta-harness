@@ -484,7 +484,9 @@ async def _resolve_playbook(
         playbook = found
     if not playbook.nodes:
         raise ValueError(f"playbook {playbook_id} has no nodes")
-    problems = validate(playbook, agent_caps=application.adapters.caps_by_name())
+    problems = [
+        i for i in validate(playbook, agent_caps=application.adapters.caps_by_name()) if i.severity == "error"
+    ]
     if problems:
         first = problems[0]
         raise ValueError(f"playbook {playbook_id} is invalid: {first.path}: {first.code}: {first.message}")
@@ -738,12 +740,11 @@ def playbook_validate(file: str) -> None:
 
     issues = validate(pb)
 
-    if issues:
-        for issue in issues:
-            print(f"{issue.path}: {issue.code}: {issue.message}")
+    for issue in issues:
+        print(f"{issue.path}: {issue.code}: {issue.message}")
+    if any(i.severity == "error" for i in issues):
         raise typer.Exit(1)
-    else:
-        print(f"ok: {pb.id} ({len(pb.nodes)} nodes)")
+    print(f"ok: {pb.id} ({len(pb.nodes)} nodes)")
 
 
 @playbook_app.command("schema")

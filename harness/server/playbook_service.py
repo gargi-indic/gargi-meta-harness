@@ -75,7 +75,7 @@ def _schema_issues(exc: ValidationError) -> list[Issue]:
     return issues
 
 
-def _validator_issue(path: str, code: str, message: str) -> Issue:
+def _validator_issue(path: str, code: str, message: str, severity: str = "error") -> Issue:
     node: str | None = None
     port: str | None = None
     parts = path.split(".")
@@ -84,7 +84,7 @@ def _validator_issue(path: str, code: str, message: str) -> Issue:
     elif parts[0] == "edges" and len(parts) == 3:
         node = None if parts[1] == "*" else parts[1]
         port = parts[2]
-    return Issue(code=code, message=message, node=node, port=port, path=path)
+    return Issue(code=code, message=message, node=node, port=port, path=path, severity=severity)  # type: ignore[arg-type]
 
 
 _OPENERS = (
@@ -150,7 +150,10 @@ def _validate_yaml(text: str, agent_caps: dict[str, set[str]] | None) -> Validat
         playbook = Playbook.model_validate(data)
     except ValidationError as exc:
         return _failed(*_schema_issues(exc))
-    issues = [_validator_issue(i.path, i.code, i.message) for i in validate(playbook, agent_caps=agent_caps)]
+    issues = [
+        _validator_issue(i.path, i.code, i.message, i.severity)
+        for i in validate(playbook, agent_caps=agent_caps)
+    ]
     return ValidationResult(
         ok=not any(i.severity == "error" for i in issues), issues=issues, playbook=playbook
     )
