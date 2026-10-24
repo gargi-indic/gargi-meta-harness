@@ -15,6 +15,7 @@ import harness
 from harness import __version__
 from harness.config import GlobalConfig
 from harness.github.client import GitHub
+from harness.ops.notifier import NotificationService, make_notifier
 from harness.server.auth import COOKIE, TokenGuard, generate_token, token_matches
 from harness.server.deps import get_bus, get_config
 from harness.server.events import EventBus, EventLogTailer, parse_last_event_id, sse_stream
@@ -43,6 +44,8 @@ def create_app(
     demo: bool = False,
     extra_routers: Sequence[APIRouter] = (),
     planner: PlannerService | None = None,
+    notifications: bool = False,
+    notification_interval_s: float = 1.0,
 ) -> FastAPI:
     token = token if token is not None else generate_token()
     port = port if port is not None else config.port
@@ -55,9 +58,20 @@ def create_app(
         task: asyncio.Task[None] | None = None
         if tail_events:
             task = asyncio.create_task(EventLogTailer(store, bus, interval_s=tail_interval_s).run())
+        notify_task: asyncio.Task[None] | None = None
+        if notifications and config.notifications.enabled:
+            service = NotificationService.from_config(
+                config, store, make_notifier(config.notifications.backend)
+            )
+            notify_task = asyncio.create_task(service.run(interval=notification_interval_s))
+        app.state.notify_task = notify_task
         try:
             yield
         finally:
+            if notify_task is not None:
+                notify_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await notify_task
             if planner is not None:
                 await planner.aclose()
             if task is not None:

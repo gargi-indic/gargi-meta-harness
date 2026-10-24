@@ -17,6 +17,7 @@ from harness.engine.dispatcher import Dispatcher
 from harness.engine.model import TERMINAL_STATUSES
 from harness.github.commands import poll_commands
 from harness.lock import Lock, LockHeld, acquire, heartbeat, iso, release
+from harness.ops.notifier import NotificationService, make_notifier
 from harness.playbook.models import Playbook
 from harness.secrets import redact
 from harness.store.repo import IssueRow, append_event, get_repo, list_issues, list_runs
@@ -129,6 +130,7 @@ async def run_daemon(
     heartbeat_every: float = 60,
     idle: float = 1.0,
     dispatch_every: float | None = None,
+    notify_every: float = 1.0,
 ) -> None:
     """Run until ``stop`` is set. Raises :class:`LockHeld` (having started nothing) if a repo is locked."""
     locks: dict[str, Lock] = {}
@@ -145,6 +147,18 @@ async def run_daemon(
 
         async def drain() -> object:
             return await app.outbox.drain_once()
+
+        if app.cfg.notifications.enabled:
+            service = NotificationService.from_config(
+                app.cfg, app.store, make_notifier(app.cfg.notifications.backend)
+            )
+            service.start_cursor()  # history is never notified
+            app.runner.notify = service.submit
+            tasks.append(
+                asyncio.create_task(
+                    _every(app, stop, "notifications", notify_every, service.poll_once, first=True)
+                )
+            )
 
         tasks.append(asyncio.create_task(app.runner.run_forever(stop, idle_sleep=idle)))
         tasks.append(asyncio.create_task(_every(app, stop, "outbox", idle, drain, first=True)))

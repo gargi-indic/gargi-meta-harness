@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import tomllib
+from datetime import time
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +32,64 @@ class RepoEntry(BaseModel):
         return v
 
 
+# Notification kinds a user can enable (``[notifications] kinds``); ``notify`` (the notify node) is always allowed.
+NOTIFICATION_KINDS = (
+    "plan_approval",
+    "merge_approval",
+    "gate",
+    "question",
+    "escalation",
+    "handoff",
+    "budget",
+    "failure",
+)
+DEFAULT_NOTIFICATION_KINDS = (
+    "plan_approval",
+    "merge_approval",
+    "gate",
+    "question",
+    "escalation",
+    "handoff",
+    "budget",
+)
+_QUIET_HOURS = re.compile(r"^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$")
+
+
+def parse_quiet_hours(text: str) -> tuple[time, time]:
+    """Parse ``"22:00-08:00"`` (the range may cross midnight) into (start, end); ValueError when invalid."""
+    match = _QUIET_HOURS.match(text.strip())
+    if match is None:
+        raise ValueError(f"quiet_hours must look like HH:MM-HH:MM, got {text!r}")
+    h1, m1, h2, m2 = (int(g) for g in match.groups())
+    if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
+        raise ValueError(f"quiet_hours has an invalid time: {text!r}")
+    return time(h1, m1), time(h2, m2)
+
+
+class NotificationsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_NOTIFICATION_KINDS))
+    quiet_hours: str | None = None
+    backend: Literal["auto", "macos", "null"] = "auto"
+    dedupe_window_s: int = Field(default=60, ge=0)
+
+    @field_validator("kinds")
+    @classmethod
+    def validate_kinds(cls, v: list[str]) -> list[str]:
+        unknown = [k for k in v if k not in NOTIFICATION_KINDS]
+        if unknown:
+            raise ValueError(f"unknown notification kinds: {', '.join(unknown)}")
+        return v
+
+    @field_validator("quiet_hours")
+    @classmethod
+    def validate_quiet_hours(cls, v: str | None) -> str | None:
+        if v is not None:
+            parse_quiet_hours(v)
+        return v
+
+
 class GlobalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     port: int = 7777
@@ -40,6 +100,7 @@ class GlobalConfig(BaseModel):
     repos: list[RepoEntry] = Field(default_factory=list)
     # Model price overrides ([pricing."model"] tables); the key "unknown" replaces the fallback price.
     pricing: dict[str, ModelPrice] = Field(default_factory=dict)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
 
     @property
     def data_path(self) -> Path:
@@ -78,6 +139,16 @@ def save_global(cfg: GlobalConfig, path: Path | None = None) -> Path:
     lines.append(f"data_dir = {json.dumps(str(cfg.data_dir))}")
     env_strs = [json.dumps(str(p)) for p in cfg.env_files]
     lines.append(f"env_files = [{', '.join(env_strs)}]")
+
+    notes = cfg.notifications
+    lines.append("")
+    lines.append("[notifications]")
+    lines.append(f"enabled = {json.dumps(notes.enabled)}")
+    lines.append(f"kinds = [{', '.join(json.dumps(k) for k in notes.kinds)}]")
+    if notes.quiet_hours is not None:
+        lines.append(f"quiet_hours = {json.dumps(notes.quiet_hours)}")
+    lines.append(f"backend = {json.dumps(notes.backend)}")
+    lines.append(f"dedupe_window_s = {notes.dedupe_window_s}")
 
     for repo in cfg.repos:
         lines.append("")
