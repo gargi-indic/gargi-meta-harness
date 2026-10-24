@@ -14,6 +14,8 @@ SSE event types (the ``event:`` field on the wire). Every payload is
   or graph.
 - ``planner.updated``: a planner proposal changed (event-log kinds ``planner_*``: a decomposition started or
   finished, a draft was edited, creation started, finished or failed); refetch ``/api/planner/proposals/{id}``.
+- ``ops.updated``: the halt state or the daily budget changed (event-log kinds ``ops_halted``, ``ops_resumed``,
+  ``ops_budget``); refetch ``/api/ops/status``.
 - ``log``: any other event-log row (daemon, sync and engine diagnostics).
 
 One event-log row publishes one bus event per mapped type, in the order of ``KIND_TO_TYPES``.
@@ -43,6 +45,7 @@ EVT_ACTIVITY = "activity"
 EVT_INBOX_CHANGED = "inbox.changed"
 EVT_ISSUE_UPDATED = "issue.updated"
 EVT_PLANNER_UPDATED = "planner.updated"
+EVT_OPS_UPDATED = "ops.updated"
 EVT_LOG = "log"
 
 _RUN = (EVT_RUN_UPDATED, EVT_ISSUE_UPDATED)
@@ -74,6 +77,9 @@ KIND_TO_TYPES: dict[str, tuple[str, ...]] = {
     "control_requested": (EVT_RUN_UPDATED,),
     "control_applied": (EVT_RUN_UPDATED, EVT_INBOX_CHANGED),
     "rerouted": (EVT_RUN_UPDATED, EVT_ISSUE_UPDATED),
+    "ops_halted": (EVT_OPS_UPDATED,),
+    "ops_resumed": (EVT_OPS_UPDATED,),
+    "ops_budget": (EVT_OPS_UPDATED,),
 }
 
 

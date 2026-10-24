@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tomllib
+import zoneinfo
 from datetime import time
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -66,6 +67,22 @@ def parse_quiet_hours(text: str) -> tuple[time, time]:
     return time(h1, m1), time(h2, m2)
 
 
+class BudgetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    daily_usd: float | None = Field(default=None, ge=0)
+    timezone: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                zoneinfo.ZoneInfo(v)
+            except zoneinfo.ZoneInfoNotFoundError:
+                raise ValueError(f"invalid timezone: {v}") from None
+        return v
+
+
 class NotificationsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
@@ -101,6 +118,7 @@ class GlobalConfig(BaseModel):
     # Model price overrides ([pricing."model"] tables); the key "unknown" replaces the fallback price.
     pricing: dict[str, ModelPrice] = Field(default_factory=dict)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
 
     @property
     def data_path(self) -> Path:
@@ -139,6 +157,15 @@ def save_global(cfg: GlobalConfig, path: Path | None = None) -> Path:
     lines.append(f"data_dir = {json.dumps(str(cfg.data_dir))}")
     env_strs = [json.dumps(str(p)) for p in cfg.env_files]
     lines.append(f"env_files = [{', '.join(env_strs)}]")
+
+    budget = cfg.budget
+    if budget.daily_usd is not None or budget.timezone is not None:
+        lines.append("")
+        lines.append("[budget]")
+        if budget.daily_usd is not None:
+            lines.append(f"daily_usd = {budget.daily_usd}")
+        if budget.timezone is not None:
+            lines.append(f"timezone = {json.dumps(budget.timezone)}")
 
     notes = cfg.notifications
     lines.append("")

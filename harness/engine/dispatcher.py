@@ -3,7 +3,7 @@ import fnmatch
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from harness.config import RepoConfig, parse_repo_config
 from harness.dag import blocked as open_blockers
@@ -82,6 +82,12 @@ def _label_value(labels: list[str], prefix: str) -> str | None:
     return None
 
 
+class StartGate(Protocol):
+    """Asked once per ``plan()``: why no new run may start right now (``halted``, ``daily_budget``) or None."""
+
+    def reason(self) -> str | None: ...
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -89,10 +95,12 @@ class Dispatcher:
         store: Store,
         caps: Mapping[str, int],
         global_cap: int | None = None,
+        gate: StartGate | None = None,
     ) -> None:
         self.store = store
         self.caps = caps
         self.global_cap = global_cap
+        self.gate = gate
 
     def _repo_config(self, repo: str) -> RepoConfig:
         stored = get_repo(self.store, repo)
@@ -135,6 +143,7 @@ class Dispatcher:
                         return number
             return None
 
+        gate_reason = self.gate.reason() if self.gate is not None else None
         decisions: list[DispatchDecision] = []
         total_active = len(active)
         for issue in sorted(ready, key=sort_key):
@@ -162,6 +171,9 @@ class Dispatcher:
                 overlap = find_overlap(issue.repo, hints)
                 if overlap is not None:
                     skip(f"overlap:#{overlap}")
+                    continue
+                if gate_reason is not None:
+                    skip(gate_reason)  # would have started: the gate holds it back
                     continue
                 skip("started")
                 active_per_agent[agent] += 1

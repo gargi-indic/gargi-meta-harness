@@ -159,3 +159,33 @@ def test_parse_repo_config_empty_and_invalid():
     # Unknown key -> ValueError (extra="forbid")
     with pytest.raises(ValueError):
         parse_repo_config("unknown: field")
+
+
+def test_budget_config_roundtrip(tmp_path):
+    from harness.config import BudgetConfig
+
+    path = tmp_path / "config.toml"
+    cfg = GlobalConfig(
+        repos=[RepoEntry(name="o/r1")],
+        budget=BudgetConfig(daily_usd=25.5, timezone="Europe/Berlin"),
+    )
+    save_global(cfg, path)
+    text = path.read_text()
+    assert text.index("[budget]") < text.index("[[repos]]")  # a table after [[repos]] would belong to it
+    loaded = load_global(path)
+    assert loaded.budget == BudgetConfig(daily_usd=25.5, timezone="Europe/Berlin")
+    assert loaded.repos == cfg.repos
+
+    save_global(GlobalConfig(), path)
+    assert load_global(path).budget == BudgetConfig()  # defaults: no cap, local time zone
+
+
+def test_budget_config_validation():
+    from harness.config import BudgetConfig
+
+    with pytest.raises(ValueError):
+        BudgetConfig(daily_usd=-1)
+    with pytest.raises(ValueError):
+        BudgetConfig(timezone="Mars/Olympus")
+    with pytest.raises(ValueError):
+        BudgetConfig(unknown=1)
