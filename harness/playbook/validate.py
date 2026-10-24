@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from harness.playbook.models import JoinNode, Playbook
-from harness.playbook.templating import TemplateError, check_expression
+from harness.playbook.templating import TemplateError, check_expression, template_variables
 
 
 @dataclass
@@ -34,6 +34,21 @@ def _reachable_joins(pb: Playbook, adj: dict[str, list[str]], start: str) -> set
         seen.add(curr)
         stack.extend(adj.get(curr, []))
     return {n for n in seen if pb.nodes[n].kind == "join"}
+
+
+def _has_ancestor(adj: dict[str, list[str]], node_id: str, candidates: set[str]) -> bool:
+    """Whether some node of ``candidates`` has a path to ``node_id`` (a node that loops back is its own ancestor)."""
+    seen: set[str] = set()
+    stack = list(candidates)
+    while stack:
+        curr = stack.pop()
+        for nxt in adj.get(curr, []):
+            if nxt == node_id:
+                return True
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return False
 
 
 def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> list[PlaybookIssue]:
@@ -132,6 +147,22 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
                         )
                     )
 
+        if node.kind == "decompose":
+            for field in ("plan", "guidance"):
+                text = getattr(node, field)
+                if text is None:
+                    continue
+                try:
+                    template_variables(text)
+                except TemplateError as e:
+                    issues.append(
+                        PlaybookIssue(
+                            f"nodes.{node_id}.{field}",
+                            "bad_template",
+                            f"Node {node_id}: invalid template in {field}: {e.message}",
+                        )
+                    )
+
         if node.kind == "parallel":
             for branch in node.branches:
                 if branch not in pb.nodes:
@@ -192,6 +223,18 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
             target = routes.get(node_id, {}).get(port, wildcards.get(port))
             if target and target in pb.nodes:
                 adj[node_id].append(target)
+
+    # A decompose node that creates issues acts on an approved plan: a `plan` gate must come before it.
+    plan_gates = {n for n, node in pb.nodes.items() if node.kind == "gate" and node.gate == "plan"}
+    for node_id, node in pb.nodes.items():
+        if node.kind == "decompose" and node.create and not _has_ancestor(adj, node_id, plan_gates):
+            issues.append(
+                PlaybookIssue(
+                    f"nodes.{node_id}.create",
+                    "create_without_plan_gate",
+                    f"Node {node_id} creates issues (create: true) and needs a gate named 'plan' upstream",
+                )
+            )
 
     # Every branch of a parallel must reach one common join.
     for node_id, node in pb.nodes.items():

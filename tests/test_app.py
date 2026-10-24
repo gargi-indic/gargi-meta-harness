@@ -137,7 +137,17 @@ async def test_aclose_closes_adapters_that_can_be_closed(tmp_path: Path) -> None
 
 def test_default_registry_kinds() -> None:
     registry = default_registry(review_backend=FakeBackend([]))
-    assert registry.kinds() == ["agent", "branch", "check", "escalate", "gate", "merge", "notify", "review"]
+    assert registry.kinds() == [
+        "agent",
+        "branch",
+        "check",
+        "decompose",
+        "escalate",
+        "gate",
+        "merge",
+        "notify",
+        "review",
+    ]
 
 
 def test_default_registry_gives_the_reviewer_its_backend() -> None:
@@ -156,7 +166,7 @@ def test_every_node_kind_of_every_builtin_playbook_has_an_executor() -> None:
     Runner(store, None, registry, AdapterRegistry())  # registers join
     used = {node.kind for pb in builtin_playbooks().values() for node in pb.nodes.values()}
     assert used, "no built-in playbooks found"
-    # `parallel` is handled by the runner itself and `decompose` is M4.
-    missing = used - {"parallel", "decompose"} - set(registry.kinds())
+    # `parallel` is handled by the runner itself.
+    missing = used - {"parallel"} - set(registry.kinds())
     assert not missing, f"no executor for node kinds: {sorted(missing)}"
     store.close()

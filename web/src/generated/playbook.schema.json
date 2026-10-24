@@ -271,6 +271,7 @@
     },
     "DecomposeNode": {
       "additionalProperties": false,
+      "description": "Turn a plan document into a proposal of an epic with sub-issues (``harness.llm.decomposer``).\n\n``plan`` is the plan source, a template: a repo file path (``docs/PLAN.md``) or an issue number (``12`` or\n``#12``). Left out, the run inputs ``plan_path`` / ``plan_issue`` (and ``plan_ref``) name it, as for the plan gate.\n``guidance`` is an optional template with extra instructions for the decomposer. The proposal is stored on\nGitHub and in the step output. With ``create: true`` the node also creates the issues, so it needs a ``plan``\ngate upstream (the validator checks); ``max_issues`` is the size limit of the proposal.",
       "properties": {
         "title": {
           "anyOf": [
@@ -302,6 +303,41 @@
           "default": "decompose",
           "title": "Kind",
           "type": "string"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan"
+        },
+        "guidance": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Guidance"
+        },
+        "create": {
+          "default": false,
+          "title": "Create",
+          "type": "boolean"
+        },
+        "max_issues": {
+          "default": 40,
+          "minimum": 1,
+          "title": "Max Issues",
+          "type": "integer"
         }
       },
       "title": "DecomposeNode",

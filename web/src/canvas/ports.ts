@@ -34,7 +34,9 @@ export function portsFor(node: PlaybookNode): string[] {
       ports = ["done", "failed"];
       break;
     case "decompose":
-      ports = ["created", "failed"];
+      ports = node.create
+        ? ["proposed", "created", "invalid", "failed"]
+        : ["proposed", "invalid", "failed"];
       break;
     case "merge":
       ports = ["merged", "failed"];
