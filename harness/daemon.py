@@ -17,6 +17,7 @@ from harness.engine.dispatcher import Dispatcher
 from harness.engine.model import TERMINAL_STATUSES
 from harness.github.commands import poll_commands
 from harness.lock import Lock, LockHeld, acquire, heartbeat, iso, release
+from harness.ops.halt import enforce_daily_cap
 from harness.ops.notifier import NotificationService, make_notifier
 from harness.playbook.models import Playbook
 from harness.secrets import redact
@@ -131,6 +132,7 @@ async def run_daemon(
     idle: float = 1.0,
     dispatch_every: float | None = None,
     notify_every: float = 1.0,
+    budget_every: float = 5.0,
 ) -> None:
     """Run until ``stop`` is set. Raises :class:`LockHeld` (having started nothing) if a repo is locked."""
     locks: dict[str, Lock] = {}
@@ -144,6 +146,12 @@ async def run_daemon(
             kind="daemon_started",
             data={"host": host, "pid": pid, "repos": [r.name for r in app.cfg.repos]},
         )
+
+        halted = app.halt_state.halted()
+        if halted is not None:
+            message = f"HALTED ({halted.reason}) since {halted.since} by {halted.by}: no run starts until `harness resume`"
+            print(message, flush=True)
+            append_event(app.store, kind="daemon_warning", data={"warning": message})
 
         async def drain() -> object:
             return await app.outbox.drain_once()
@@ -162,6 +170,9 @@ async def run_daemon(
 
         tasks.append(asyncio.create_task(app.runner.run_forever(stop, idle_sleep=idle)))
         tasks.append(asyncio.create_task(_every(app, stop, "outbox", idle, drain, first=True)))
+        tasks.append(
+            asyncio.create_task(_every(app, stop, "budget", budget_every, _budget_job(app), first=True))
+        )
         for entry in app.cfg.repos:
             repo = entry.name
             tasks.append(
@@ -255,11 +266,18 @@ def _heartbeat_job(app: App, stop: asyncio.Event, repo: str, lock: Lock) -> Call
     return job
 
 
+def _budget_job(app: App) -> Callable[[], Awaitable[object]]:
+    async def job() -> object:
+        return enforce_daily_cap(app.runner, app.store, app.halt_state, app.daily_budget)
+
+    return job
+
+
 def _dispatch_job(app: App, repo: str) -> Callable[[], Awaitable[object]]:
     async def job() -> object:
         config = app.repo_configs.get(repo) or RepoConfig()
         caps = {name: agent.max_concurrency for name, agent in config.agents.items() if agent.enabled}
-        dispatcher = Dispatcher(store=app.store, caps=caps)
+        dispatcher = Dispatcher(store=app.store, caps=caps, gate=app.gate)
 
         async def ready_provider() -> list[IssueRow]:
             issues = list_issues(app.store, repo)

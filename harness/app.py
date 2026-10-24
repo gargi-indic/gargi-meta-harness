@@ -24,6 +24,8 @@ from harness.engine.runner import Runner
 from harness.github.client import GitHub
 from harness.github.outbox import Outbox
 from harness.llm.backend import ClaudeSdkBackend, ReviewBackend
+from harness.ops.budget import DailyBudget
+from harness.ops.halt import HaltState, OpsGate, control_issues_of, make_daily_budget
 from harness.ops.pricing import default_table
 from harness.playbook.load import builtin_playbooks
 from harness.secrets import github_token, load_env_files
@@ -44,6 +46,9 @@ class App:
     review_backend: ReviewBackend
     runner: Runner
     repo_configs: dict[str, RepoConfig]
+    halt_state: HaltState
+    daily_budget: DailyBudget
+    gate: OpsGate
     clock: Callable[[], float] = field(default=time.time, repr=False)
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
 
@@ -159,6 +164,8 @@ def build_app(
     )
     # Runner keeps its own dict when handed an empty one; make both views share the same configs.
     runner.repo_configs = repo_configs
+    halt_state = HaltState(store, outbox, lambda: control_issues_of(store, cfg))
+    daily_budget = make_daily_budget(cfg, store, halt_state, clock)
     return App(
         cfg=cfg,
         store=store,
@@ -169,6 +176,9 @@ def build_app(
         review_backend=backend,
         runner=runner,
         repo_configs=repo_configs,
+        halt_state=halt_state,
+        daily_budget=daily_budget,
+        gate=OpsGate(halt_state, daily_budget),
         clock=clock,
         sleep=sleep,
     )

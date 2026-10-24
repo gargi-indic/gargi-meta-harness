@@ -17,16 +17,25 @@ class BudgetStatus:
 
 
 class DailyBudget:
+    """Spend since local midnight against a daily limit.
+
+    The limit is the ledger override (``override()``, set by ``harness budget --set``) when there is one, else
+    ``limit_usd`` (the ``[budget] daily_usd`` config). ``unknown_cost_runs`` counts runs created today for
+    which no agent ever reported usage: their spend is unknown, not zero.
+    """
+
     def __init__(
         self,
         repo: UsageRepo,
         *,
         limit_usd: float | None,
+        override: Callable[[], float | None] | None = None,
         tz: tzinfo | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repo = repo
         self.limit_usd = limit_usd
+        self.override = override
         self.tz = tz or datetime.now().astimezone().tzinfo or UTC
         self.clock = clock or (lambda: datetime.now(UTC))
 
@@ -50,14 +59,16 @@ class DailyBudget:
                 if recorded_total(run.context) is None:
                     unknown_cost_runs += 1
 
+        override = self.override() if self.override is not None else None
+        limit = override if override is not None else self.limit_usd
         remaining_usd = None
         exceeded = False
-        if self.limit_usd is not None:
-            remaining_usd = max(0.0, self.limit_usd - spent_usd)
-            exceeded = spent_usd >= self.limit_usd
+        if limit is not None:
+            remaining_usd = max(0.0, limit - spent_usd)
+            exceeded = spent_usd >= limit
 
         return BudgetStatus(
-            limit_usd=self.limit_usd,
+            limit_usd=limit,
             spent_usd=spent_usd,
             remaining_usd=remaining_usd,
             resets_at=resets_at,

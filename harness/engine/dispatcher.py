@@ -83,7 +83,10 @@ def _label_value(labels: list[str], prefix: str) -> str | None:
 
 
 class StartGate(Protocol):
+    """Asked once per ``plan()``: why no new run may start right now (``halted``, ``daily_budget``) or None."""
+
     def reason(self) -> str | None: ...
+
 
 class Dispatcher:
     def __init__(
@@ -140,6 +143,7 @@ class Dispatcher:
                         return number
             return None
 
+        gate_reason = self.gate.reason() if self.gate is not None else None
         decisions: list[DispatchDecision] = []
         total_active = len(active)
         for issue in sorted(ready, key=sort_key):
@@ -152,11 +156,7 @@ class Dispatcher:
             ) -> None:
                 decisions.append(DispatchDecision(issue.number, agent, playbook, reason))
 
-            gate_reason = self.gate.reason() if self.gate is not None else None
-
-            if gate_reason is not None:
-                skip(gate_reason)
-            elif agent not in self.caps:
+            if agent not in self.caps:
                 skip("agent_disabled")
             elif (issue.repo, issue.number) in active_issues:
                 skip("running")
@@ -171,6 +171,9 @@ class Dispatcher:
                 overlap = find_overlap(issue.repo, hints)
                 if overlap is not None:
                     skip(f"overlap:#{overlap}")
+                    continue
+                if gate_reason is not None:
+                    skip(gate_reason)  # would have started: the gate holds it back
                     continue
                 skip("started")
                 active_per_agent[agent] += 1

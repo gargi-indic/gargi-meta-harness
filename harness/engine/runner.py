@@ -59,6 +59,8 @@ BUDGET_WARN_FRACTION = 0.8
 # shows any waiting step with ``needs_you``, and a node that the playbook lacks is listed as an escalation.
 BUDGET_NODE = "budget"
 BUDGET_EXCEEDED = "budget_exceeded"
+# Run-context flag: the run was paused by the daily budget cap (see harness.ops.halt).
+DAILY_CAP_KEY = "daily_cap_paused"
 # Output caps tried in turn when the rendered ledger comment would be too large.
 _LEDGER_CAPS = (8 * 1024, 2 * 1024, 512, 0)
 
@@ -937,6 +939,44 @@ class Runner:
             work.comments.append(("budget exceeded", [summary, f"run `{run_id}`"]))
             self._finalize(work, run.status)
 
+    def escalate_daily_cap(self, run_id: str, summary: str) -> None:
+        """Daily cap spent: give the run a budget-style inbox escalation (once); the pause itself is a control request.
+
+        The run is flagged ``daily_cap_paused`` so ``harness resume`` knows to resume it and to resolve the item.
+        """
+        with self.store.tx():
+            run = get_run(self.store, run_id)
+            if run is None or run.status not in ACTIVE_RUN_STATUSES or run.context.get(DAILY_CAP_KEY):
+                return
+            work = _Work(
+                run=run, ctx=copy.deepcopy(run.context), playbook=self._playbook_for(run), status="running"
+            )
+            work.ctx[DAILY_CAP_KEY] = True
+            visit = 1 + sum(1 for s in steps_for_run(self.store, run_id) if s.node_id == BUDGET_NODE)
+            insert_step(
+                self.store,
+                StepRow(
+                    id=f"{run_id}/{BUDGET_NODE}/{visit}",
+                    run_id=run_id,
+                    node_id=BUDGET_NODE,
+                    visit=visit,
+                    status="waiting",
+                    outcome=None,
+                    ref=None,
+                    output={
+                        "needs_you": True,
+                        "reason": f"Daily budget exceeded: {summary}. The run is paused.",
+                        "links": [],
+                    },
+                    poll_after=None,
+                    started_at=self.store.now(),
+                    ended_at=None,
+                ),
+            )
+            self._event(run, "daily_budget_paused", {"summary": summary})
+            self._recompute_status(work)
+            self._finalize(work, run.status)
+
     async def run_forever(self, stop: asyncio.Event, idle_sleep: float = 1.0) -> None:
         """Tick until ``stop`` is set. A failing tick is recorded as an event and does not end the loop."""
         while not stop.is_set():
@@ -985,6 +1025,12 @@ class Runner:
                 if run.status != "paused":
                     return
                 self._event(run, "resumed", {"to": None})
+                if work.ctx.pop(DAILY_CAP_KEY, None):  # the daily cap pause is over: resolve its escalation
+                    for s in steps_for_run(self.store, run_id):
+                        if s.node_id == BUDGET_NODE and s.status == "waiting":
+                            update_step(
+                                self.store, s.id, status="done", outcome="resolved", ended_at=self.store.now()
+                            )
                 self._recompute_status(work)
                 self._finalize(work, run.status)
                 return

@@ -1,6 +1,6 @@
 """Response models of the read-only REST API. They are the API contract: keep them stable and documented."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -194,34 +194,52 @@ class CostsSummary(Schema):
 
 
 class HaltInfoOut(Schema):
-    reason: str = Field(description="Reason for halt: 'kill_switch' or 'daily_budget'.")
-    since: str = Field(description="When the halt was activated (ISO 8601 UTC).")
-    by: str = Field(description="User or system that activated the halt.")
+    reason: Literal["kill_switch", "daily_budget"] = Field(
+        description="Why the harness is halted: the kill switch, or the daily budget cap."
+    )
+    since: str = Field(description="When the halt was set (ISO 8601 UTC).")
+    by: str = Field(description="Who set the halt: a user or interface name, or 'system' for the daily cap.")
 
 
 class BudgetStatusOut(Schema):
-    limit_usd: float | None = Field(description="Current daily limit, or null if none.")
-    spent_usd: float = Field(description="USD spent since the last reset.")
-    remaining_usd: float | None = Field(description="Remaining budget, or null if no limit.")
-    resets_at: str = Field(description="When the budget resets (ISO 8601 UTC).")
-    exceeded: bool = Field(description="True when spent >= limit.")
-    unknown_cost_runs: int = Field(description="Number of runs started today with no reported costs.")
+    limit_usd: float | None = Field(
+        description="The daily limit in USD (the ledger override, else the config), or null when there is none."
+    )
+    spent_usd: float = Field(description="USD spent since the last local midnight.")
+    remaining_usd: float | None = Field(description="USD left today, or null when there is no limit.")
+    resets_at: str = Field(
+        description="The next local midnight, when the day's spend restarts (ISO 8601 UTC)."
+    )
+    exceeded: bool = Field(description="True when today's spend has reached the limit.")
+    unknown_cost_runs: int = Field(
+        description="Runs started today for which no agent reported any cost (their spend is unknown)."
+    )
 
 
 class OpsStatusOut(Schema):
-    halted: HaltInfoOut | None = Field(description="Halt info, or null if the system is running.")
-    budget: BudgetStatusOut = Field(description="Status of the global daily budget.")
+    halted: HaltInfoOut | None = Field(description="The halt, or null while the harness is running.")
+    budget: BudgetStatusOut = Field(description="Today's spend against the daily limit.")
 
 
 class KillRequest(Schema):
-    confirm: str = Field(description="Must be exactly the string 'KILL'.")
+    confirm: Literal["KILL"] = Field(description="Confirmation: must be exactly the string KILL.")
 
 
-class KillReportOut(Schema):
-    errors: list[list[str]] = Field(
-        description="List of [run_id, error_message] pairs for sessions that failed to cancel."
+class KillOut(Schema):
+    halted: bool = Field(description="True: the halt was recorded, so no new run starts.")
+    cancels_queued: int = Field(
+        description="Cancel requests queued for non-terminal runs; the daemon applies them on its next tick."
+    )
+
+
+class ResumeOut(Schema):
+    resumed_runs: list[str] = Field(
+        description="Ids of the runs paused by the daily cap for which a resume request was queued."
     )
 
 
 class BudgetRequest(Schema):
-    daily_usd: float | None = Field(description="New daily limit in USD, or null to clear.", ge=0)
+    daily_usd: float | None = Field(
+        ge=0,
+        description="The new daily limit in USD that overrides the config, or null to clear the override.",
+    )

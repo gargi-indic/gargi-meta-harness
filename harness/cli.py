@@ -28,6 +28,7 @@ from harness.github.labels import ensure_harness_labels
 from harness.github.outbox import Outbox, OutboxOpFailed, ledger_mirror_key
 from harness.lock import LockHeld
 from harness.ops.costs import UsageRepo, parse_since
+from harness.ops.halt import kill_all, queue_resume
 from harness.ops.notifier import TITLE, Notification, make_notifier
 from harness.planner.materialize import MaterializeContext, MaterializeError, materialize, plan_run_key
 from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
@@ -351,16 +352,102 @@ def pause(run: str) -> None:
 
 @app.command()
 def resume(
-    run: str,
+    run: str = typer.Argument(
+        None, help="Run to resume. Without it: clear the halt (kill switch, daily cap)."
+    ),
     to: str = typer.Option(None, "--to", help="Resume at this node (a human override)."),
 ) -> None:
-    """Resume a paused run, or restart it at a node."""
+    """Resume a paused run, or restart it at a node; without a run, lift the halt and resume the paused runs."""
+    if run is None:
+        if to is not None:
+            raise _fail("--to needs a run")
+        _ops_control(lambda application: _ops_resume(application))
+        return
 
     async def action(runner: Runner) -> str:
         runner.resume(run, to=to)
         return f"resumed: {run}" + (f" at {to}" if to else "")
 
     _control(action)
+
+
+def _ops_control(action: Callable[[App], Awaitable[str]]) -> None:
+    """Run an ops action with a full App. The outbox only enqueues here (a daemon drains it): no real token."""
+    cfg = load_global()
+    if not cfg.db_path.exists():
+        raise _fail("not synced: run harness sync")
+    application = build_app(cfg, gh=GitHub(token="unused"))
+
+    async def _go() -> str:
+        try:
+            return await action(application)
+        finally:
+            await application.aclose()
+
+    try:
+        print(asyncio.run(_go()))
+    except (KeyError, ValueError) as exc:
+        raise _fail(_error_message(exc)) from None
+
+
+def _no_control_issue(application: App) -> None:
+    if not application.halt_state.control_issues:
+        raise ValueError("no repo with a control issue is synced: the halt has nowhere to be recorded")
+
+
+async def _ops_resume(application: App) -> str:
+    _no_control_issue(application)
+    was = application.halt_state.halted()
+    resumed = queue_resume(application.store, application.halt_state, by="cli")
+    head = f"resumed (was halted: {was.reason})" if was else "not halted"
+    return head + (f"; resuming {len(resumed)} paused run(s)" if resumed else "")
+
+
+@app.command()
+def kill(yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation.")) -> None:
+    """Kill switch: halt the harness and cancel every active run."""
+    if (
+        not yes
+        and input("Cancel every active run and halt the harness? Type KILL to confirm: ").strip() != "KILL"
+    ):
+        raise _fail("aborted")
+
+    async def action(application: App) -> str:
+        _no_control_issue(application)
+        report = await kill_all(application.runner, application.store, application.halt_state, by="cli")
+        lines = ["halted (kill_switch): no new run starts until `harness resume`"]
+        lines += [f"could not cancel {run_id}: {redact(error)}" for run_id, error in report.errors]
+        return "\n".join(lines)
+
+    _ops_control(action)
+
+
+@app.command()
+def budget(
+    set_usd: float = typer.Option(None, "--set", min=0, help="Set the daily budget override in USD."),
+    clear: bool = typer.Option(False, "--clear", help="Remove the override (the config value applies)."),
+) -> None:
+    """Show today's spend against the daily budget, set an override (--set N) or clear it (--clear)."""
+    if set_usd is not None and clear:
+        raise _fail("use either --set or --clear")
+
+    async def action(application: App) -> str:
+        if set_usd is not None or clear:
+            _no_control_issue(application)
+            application.halt_state.set_daily_budget(set_usd)
+        status = application.daily_budget.status()
+        limit = f"${status.limit_usd:.2f}" if status.limit_usd is not None else "no limit"
+        halted = application.halt_state.halted()
+        lines = [
+            f"limit: {limit}",
+            f"spent today: ${status.spent_usd:.2f}" + (" (exceeded)" if status.exceeded else ""),
+            f"resets at: {status.resets_at}",
+            f"runs with unknown cost today: {status.unknown_cost_runs}",
+            f"halted: {halted.reason if halted else 'no'}",
+        ]
+        return "\n".join(lines)
+
+    _ops_control(action)
 
 
 @app.command()

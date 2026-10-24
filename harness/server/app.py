@@ -15,9 +15,8 @@ import harness
 from harness import __version__
 from harness.config import GlobalConfig
 from harness.github.client import GitHub
-from harness.ops.budget import DailyBudget
-from harness.ops.costs import UsageRepo
-from harness.ops.halt import HaltState
+from harness.github.outbox import Outbox
+from harness.ops.halt import HaltState, control_issues_of, make_daily_budget
 from harness.ops.notifier import NotificationService, make_notifier
 from harness.server.auth import COOKIE, TokenGuard, generate_token, token_matches
 from harness.server.deps import get_bus, get_config
@@ -87,26 +86,13 @@ def create_app(
     app.state.store = store
     app.state.config = config
 
-    from harness.app import _stored_repo_configs
-    from harness.github.outbox import Outbox
-
-    repo_configs = _stored_repo_configs(store, config)
-    control_issues = []
-    for r in config.repos:
-        r_conf = repo_configs.get(r.name)
-        if r_conf and r_conf.control_issue:
-            control_issues.append((r.name, r_conf.control_issue))
-
-    app.state.halt_state = HaltState(store, Outbox(store, gh) if gh else Outbox(store, None), control_issues)
-    import zoneinfo
-
-    tz = None
-    if config.budget.timezone is not None:
-        try:
-            tz = zoneinfo.ZoneInfo(config.budget.timezone)
-        except zoneinfo.ZoneInfoNotFoundError:
-            pass
-    app.state.daily_budget = DailyBudget(UsageRepo(store), limit_usd=config.budget.daily_usd, tz=tz)
+    # The server has no daemon: halt, resume and budget only queue outbox ops (the daemon drains them).
+    app.state.halt_state = HaltState(
+        store,
+        Outbox(store, gh),
+        lambda: control_issues_of(store, config),  # type: ignore[arg-type]
+    )
+    app.state.daily_budget = make_daily_budget(config, store, app.state.halt_state)
     app.state.bus = bus
     app.state.token = token
     app.state.port = port
