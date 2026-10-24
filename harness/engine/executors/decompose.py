@@ -34,10 +34,10 @@ from harness.llm.backend import ReviewBackend
 from harness.llm.decomposer import DecompositionError, decompose
 from harness.planner.context import RepoContext, build_repo_context
 from harness.planner.materialize import MaterializeContext, MaterializeError, MaterializeResult, materialize
+from harness.planner.options import enabled_agents, repo_playbooks
 from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
 from harness.planner.proposal import ProposalIssue, ProposedPlan
 from harness.planner.proposal_store import StoredProposal, get_proposal, save_proposal, update_proposal
-from harness.playbook.load import PlaybookError, builtin_playbooks, load_playbook
 from harness.playbook.models import DecomposeNode, Playbook
 from harness.playbook.templating import TemplateError, render
 from harness.secrets import redact
@@ -48,8 +48,6 @@ MaterializeFn = Callable[[ProposedPlan, MaterializeContext], Awaitable[Materiali
 STATUS_PROPOSED = "proposed"
 STATUS_CREATED = "created"
 _ISSUE_SOURCE = re.compile(r"^#?(\d+)$")
-_PLAYBOOK_DIR = ".harness/playbooks"
-_YAML_SUFFIXES = (".yaml", ".yml")
 
 
 class DecomposeExecutor:
@@ -181,38 +179,13 @@ async def _repo_context(gh: GitHub, ctx: ExecContext, plan_doc: PlanDoc) -> Repo
 
 def _agents(ctx: ExecContext) -> Mapping[str, Capabilities]:
     """The registered adapters, minus the ones that the repo config switches off."""
-    configured = ctx.repo_config.agents
-    return {
-        name: ctx.adapters.get(name).caps
-        for name in ctx.adapters.names()
-        if name not in configured or configured[name].enabled
-    }
+    caps = {name: ctx.adapters.get(name).caps for name in ctx.adapters.names()}
+    return enabled_agents(caps, ctx.repo_config.agents)
 
 
 async def _playbooks(gh: GitHub, repo: str) -> dict[str, Playbook]:
     """The built-in playbooks plus the valid ones in the repo's ``.harness/playbooks`` (those win by id)."""
-    found = dict(builtin_playbooks())
-    try:
-        entries = await gh.get(f"repos/{repo}/contents/{_PLAYBOOK_DIR}")
-    except GitHubError as exc:
-        if exc.status == 404:
-            return found
-        raise
-    for entry in entries if isinstance(entries, list) else []:
-        if not isinstance(entry, dict):
-            continue
-        path = str(entry.get("path", ""))
-        if entry.get("type") != "file" or not path.endswith(_YAML_SUFFIXES):
-            continue
-        text = await gh.file_text(repo, path)
-        if text is None:
-            continue
-        try:
-            playbook = load_playbook(text)
-        except PlaybookError:
-            continue  # a broken repo playbook cannot be chosen
-        found[playbook.id] = playbook
-    return found
+    return await repo_playbooks(gh, repo)
 
 
 def _materialize_context(

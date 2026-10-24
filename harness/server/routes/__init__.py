@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from harness.server.routes import actions, board, campaigns, config, inbox, playbooks, runs
+from harness.server.routes import actions, board, campaigns, config, inbox, planner, playbooks, runs
 
 
 def api_routers() -> list[APIRouter]:
@@ -13,5 +13,6 @@ def api_routers() -> list[APIRouter]:
         runs.router,
         actions.router,
         playbooks.router,
+        planner.router,
         config.router,
     ]

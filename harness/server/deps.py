@@ -4,11 +4,12 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from harness.config import GlobalConfig
 from harness.github.client import GitHub
 from harness.server.events import EventBus
+from harness.server.planner_service import PlannerService
 from harness.store.db import Store
 
 
@@ -39,3 +40,10 @@ def get_builtin_dir(request: Request) -> Path:
 
 def get_clock(request: Request) -> Callable[[], datetime]:
     return request.app.state.clock
+
+
+def get_planner(request: Request) -> PlannerService:
+    planner = getattr(request.app.state, "planner", None)
+    if planner is None:
+        raise HTTPException(status_code=503, detail="GitHub not configured")
+    return planner

@@ -12,6 +12,8 @@ SSE event types (the ``event:`` field on the wire). Every payload is
   applied control request); refetch ``/api/inbox``.
 - ``issue.updated``: an issue's derived status or run may have changed (also after a reroute); refetch board
   or graph.
+- ``planner.updated``: a planner proposal changed (event-log kinds ``planner_*``: a decomposition started or
+  finished, a draft was edited, creation started, finished or failed); refetch ``/api/planner/proposals/{id}``.
 - ``log``: any other event-log row (daemon, sync and engine diagnostics).
 
 One event-log row publishes one bus event per mapped type, in the order of ``KIND_TO_TYPES``.
@@ -40,6 +42,7 @@ EVT_STEP_UPDATED = "step.updated"
 EVT_ACTIVITY = "activity"
 EVT_INBOX_CHANGED = "inbox.changed"
 EVT_ISSUE_UPDATED = "issue.updated"
+EVT_PLANNER_UPDATED = "planner.updated"
 EVT_LOG = "log"
 
 _RUN = (EVT_RUN_UPDATED, EVT_ISSUE_UPDATED)
@@ -75,12 +78,15 @@ KIND_TO_TYPES: dict[str, tuple[str, ...]] = {
 
 
 def types_for_kind(kind: str) -> tuple[str, ...]:
-    """The SSE types an event-log kind publishes; ``run_<other status>`` behaves like ``run_running``."""
+    """The SSE types an event-log kind publishes; ``run_<other status>`` behaves like ``run_running``, ``planner_*``
+    publishes ``planner.updated``."""
     mapped = KIND_TO_TYPES.get(kind)
     if mapped is not None:
         return mapped
     if kind.startswith("run_"):
         return _RUN
+    if kind.startswith("planner_"):
+        return (EVT_PLANNER_UPDATED,)
     return (EVT_LOG,)
 
 
