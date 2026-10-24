@@ -5,7 +5,8 @@ GitHub is the state store. A proposal is saved as one or more comments on the co
     <!-- harness:proposal run=<run_id> sha=<plan_sha> part=<k>/<n> -->
 
 The rest of a comment is a short note for humans and the data in a fenced block inside ``<details>``. The data is
-a JSON envelope ``{"v", "run_id", "plan_sha", "status", "created_at", "proposal"}`` in compact form, with ``<``,
+a JSON envelope ``{"v", "run_id", "plan_sha", "status", "created_at", "proposal"}`` (plus ``"rev"`` and ``"meta"``
+when they are not the defaults 1 and ``{}``) in compact form, with ``<``,
 ``>`` and the backtick written as JSON ``\\u`` escapes (so neither a comment opener nor a code fence can occur in
 it), cut into parts of at most ``MAX_COMMENT_CHARS`` characters; the parts joined in order give the JSON text.
 A part is edited in place when the proposal is saved again (matched by its marker, never duplicated); parts that a
@@ -17,13 +18,19 @@ Writes go through the outbox (``add_comment`` / ``edit_comment``) and are awaite
 itself) are written only after GitHub has the comments. ``get_proposal`` answers from the mirror first and refills it
 from the comments when it is empty; ``harness sync`` rebuilds the whole mirror (``restore_proposal_mirror``).
 
+``rev`` is a counter that the caller bumps with every change of the draft, and ``meta`` a small JSON object of the
+caller's own (the planner API keeps the plan source, job errors and results there). The ``proposals`` table has no
+column for either, so the mirror keeps them in the ``meta`` key-value table under ``proposal:ext:<run>:<sha>``;
+callers that never set them (the decompose executor) see ``rev`` 1 and ``meta`` ``{}`` and write the same text as
+before.
+
 Like the ledger, the comments are trusted as they stand: the control issue of a private repo is writable by
 collaborators only. Nothing here verifies who wrote a comment.
 """
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import ValidationError
@@ -35,8 +42,10 @@ from harness.store.db import Store
 from harness.store.repo import (
     ProposalRow,
     delete_proposal_rows_of_repo,
+    get_meta,
     get_proposal_row,
     save_proposal_row,
+    set_meta,
 )
 
 LEDGER_KEY = "proposal"
@@ -61,6 +70,8 @@ class StoredProposal:
     status: str
     created_at: str
     proposal: ProposedPlan
+    rev: int = 1
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 # ---- the comment format --------------------------------------------------------------------------------
@@ -79,6 +90,10 @@ def _envelope_text(stored: StoredProposal) -> str:
         "created_at": stored.created_at,
         "proposal": stored.proposal.model_dump(mode="json"),
     }
+    if stored.rev != 1:
+        envelope["rev"] = stored.rev
+    if stored.meta:
+        envelope["meta"] = stored.meta
     text = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
     return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("`", "\\u0060")
 
@@ -164,9 +179,14 @@ def _assemble(by_k: dict[int, _Part]) -> StoredProposal | None:
         ):
             return None
         proposal = ProposedPlan.model_validate(envelope.get("proposal"))
+        rev, meta = envelope.get("rev", 1), envelope.get("meta", {})
+        if not isinstance(rev, int) or isinstance(rev, bool) or rev < 1 or not isinstance(meta, dict):
+            return None
     except (ValueError, ValidationError):
         return None
-    return StoredProposal(first.run_id, first.plan_sha, envelope["status"], envelope["created_at"], proposal)
+    return StoredProposal(
+        first.run_id, first.plan_sha, envelope["status"], envelope["created_at"], proposal, rev, meta
+    )
 
 
 def read_proposals(comments: list[dict[str, Any]]) -> list[StoredProposal]:
@@ -185,23 +205,47 @@ def read_proposals(comments: list[dict[str, Any]]) -> list[StoredProposal]:
 # ---- the mirror ------------------------------------------------------------------------------------------
 
 
-def _from_row(row: ProposalRow) -> StoredProposal | None:
+def _ext_key(run_id: str, plan_sha: str) -> str:
+    return f"proposal:ext:{run_id}:{plan_sha}"
+
+
+def _ext_of(store: Store, run_id: str, plan_sha: str) -> tuple[int, dict[str, Any]]:
+    """The mirrored ``(rev, meta)``; the defaults when there are none or the text cannot be read."""
+    raw = get_meta(store, _ext_key(run_id, plan_sha))
+    try:
+        data = json.loads(raw) if raw else {}
+        rev, meta = data.get("rev", 1), data.get("meta", {})
+        if isinstance(rev, int) and not isinstance(rev, bool) and rev >= 1 and isinstance(meta, dict):
+            return rev, meta
+    except (ValueError, AttributeError):
+        pass
+    return 1, {}
+
+
+def _from_row(store: Store, row: ProposalRow) -> StoredProposal | None:
     try:
         proposal = ProposedPlan.model_validate_json(row.json_text)
     except ValueError:  # pydantic's ValidationError is a ValueError
         return None
-    return StoredProposal(row.run_id, row.plan_sha, row.status, row.created_at, proposal)
+    rev, meta = _ext_of(store, row.run_id, row.plan_sha)
+    return StoredProposal(row.run_id, row.plan_sha, row.status, row.created_at, proposal, rev, meta)
 
 
 def _mirror(store: Store, stored: StoredProposal) -> None:
-    save_proposal_row(
-        store,
-        run_id=stored.run_id,
-        plan_sha=stored.plan_sha,
-        json_text=stored.proposal.model_dump_json(),
-        status=stored.status,
-        created_at=stored.created_at,
-    )
+    key = _ext_key(stored.run_id, stored.plan_sha)
+    with store.tx():
+        save_proposal_row(
+            store,
+            run_id=stored.run_id,
+            plan_sha=stored.plan_sha,
+            json_text=stored.proposal.model_dump_json(),
+            status=stored.status,
+            created_at=stored.created_at,
+        )
+        if stored.rev != 1 or stored.meta:
+            set_meta(store, key, json.dumps({"rev": stored.rev, "meta": stored.meta}, sort_keys=True))
+        else:
+            store.execute("DELETE FROM meta WHERE key = ?", (key,))
 
 
 # ---- public API ------------------------------------------------------------------------------------------
@@ -226,12 +270,15 @@ async def save_proposal(
     plan_sha: str,
     proposal: ProposedPlan,
     status: str = "proposed",
+    rev: int = 1,
+    meta: dict[str, Any] | None = None,
 ) -> StoredProposal:
     """Write the proposal to the control issue (GitHub first), then to the ledger summary and the mirror.
 
     Saving the same ``(run_id, plan_sha)`` again edits the comments that are there; one that already has the right
     text is not touched. Raises ``OutboxOpFailed`` when GitHub did not take a write (nothing is mirrored then, the
-    queued writes stay in the outbox and go out when it drains again).
+    queued writes stay in the outbox and go out when it drains again). ``rev`` and ``meta`` are stored with the
+    proposal (see the module text); ``meta`` must be JSON.
     """
     _check(run_id, plan_sha, status)
     gh = outbox.gh
@@ -240,7 +287,7 @@ async def save_proposal(
     before = _assemble(existing)
     row = get_proposal_row(store, run_id, plan_sha)
     created_at = (before.created_at if before else None) or (row.created_at if row else None) or store.now()
-    stored = StoredProposal(run_id, plan_sha, status, created_at, proposal)
+    stored = StoredProposal(run_id, plan_sha, status, created_at, proposal, rev, dict(meta or {}))
 
     bodies = _render_parts(stored)
     prefix = f"proposal:{repo}#{control_issue}:{run_id}:{plan_sha}"
@@ -304,7 +351,7 @@ async def get_proposal(
     A proposal found on GitHub refills the mirror. None when neither has it.
     """
     row = get_proposal_row(store, run_id, plan_sha)
-    stored = _from_row(row) if row is not None else None
+    stored = _from_row(store, row) if row is not None else None
     if stored is not None:
         return stored
     found = [
@@ -329,8 +376,10 @@ async def update_proposal(
     plan_sha: str,
     proposal: ProposedPlan | None = None,
     status: str | None = None,
+    rev: int | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> StoredProposal:
-    """Change the proposal and/or its status, through the same GitHub-first path as ``save_proposal``.
+    """Change the proposal, its status, ``rev`` and/or ``meta`` (replaced as a whole), GitHub first like ``save_proposal``.
 
     Raises ``KeyError`` when there is no proposal for ``(run_id, plan_sha)``.
     """
@@ -348,6 +397,8 @@ async def update_proposal(
         plan_sha=plan_sha,
         proposal=proposal if proposal is not None else current.proposal,
         status=status if status is not None else current.status,
+        rev=rev if rev is not None else current.rev,
+        meta=meta if meta is not None else current.meta,
     )
 
 
@@ -357,6 +408,8 @@ async def restore_proposal_mirror(gh: GitHub, store: Store, repo: str, control_i
     found = [s for s in read_proposals(await gh.comments(repo, control_issue)) if s.run_id.startswith(prefix)]
     with store.tx():
         delete_proposal_rows_of_repo(store, repo)
+        ext_prefix = f"proposal:ext:{repo}#"
+        store.execute("DELETE FROM meta WHERE substr(key, 1, ?) = ?", (len(ext_prefix), ext_prefix))
         for stored in found:
             _mirror(store, stored)
     return len(found)

@@ -18,6 +18,7 @@ from harness.github.client import GitHub
 from harness.server.auth import COOKIE, TokenGuard, generate_token, token_matches
 from harness.server.deps import get_bus, get_config
 from harness.server.events import EventBus, EventLogTailer, parse_last_event_id, sse_stream
+from harness.server.planner_service import PlannerService
 from harness.server.routes import api_routers
 from harness.server.static import register_static
 from harness.store.db import Store
@@ -41,10 +42,13 @@ def create_app(
     clock: Callable[[], datetime] | None = None,
     demo: bool = False,
     extra_routers: Sequence[APIRouter] = (),
+    planner: PlannerService | None = None,
 ) -> FastAPI:
     token = token if token is not None else generate_token()
     port = port if port is not None else config.port
     bus = bus if bus is not None else EventBus()
+    if planner is None and gh is not None:
+        planner = PlannerService(store=store, gh=gh, config=config)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -54,6 +58,8 @@ def create_app(
         try:
             yield
         finally:
+            if planner is not None:
+                await planner.aclose()
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -68,6 +74,7 @@ def create_app(
     app.state.port = port
     app.state.keepalive_s = keepalive_s
     app.state.gh = gh
+    app.state.planner = planner
     # `harness/playbooks` has no __init__.py, so `importlib.resources.files(...)` would give a MultiplexedPath
     # whose str() is not a filesystem path; the directory sits next to this package's parent module instead.
     app.state.builtin_dir = (
