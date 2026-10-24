@@ -1,0 +1,14 @@
+{
+  "_synthetic": true,
+  "number": 77,
+  "state": "open",
+  "merged": false,
+  "html_url": "https://github.com/o/r/pull/77",
+  "head": {
+    "ref": "copilot/fix-52",
+    "sha": "abc123"
+  },
+  "body": "Fixes #52",
+  "title": "[WIP] Add the thing",
+  "draft": true
+}

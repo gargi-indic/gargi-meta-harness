@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from harness.adapters.base import AdapterRegistry
 from harness.adapters.claude import ClaudeAdapter, ClaudeAgentConfig
 from harness.adapters.codex import CodexAdapter, CodexAgentConfig
+from harness.adapters.copilot import CopilotAdapter, CopilotAgentConfig
 from harness.adapters.fake import FakeAdapter
 from harness.adapters.jules import JulesAdapter
 from harness.config import AgentConfig, GlobalConfig, RepoConfig
@@ -132,6 +133,16 @@ def build_app(
                         pricing=pricing,
                     )
                 )
+
+        # Copilot needs the user token and is registered only on an explicit, enabled ``agents.copilot`` entry.
+        copilot_enabled = [
+            rc.agents["copilot"]
+            for rc in repo_configs.values()
+            if "copilot" in rc.agents and rc.agents["copilot"].enabled
+        ]
+        if copilot_enabled:
+            copilot_cfg = CopilotAgentConfig(**copilot_enabled[0].model_dump())
+            adapters.register(CopilotAdapter(gh=client, config=copilot_cfg, token=github_token()))
 
     backend = review_backend if review_backend is not None else ClaudeSdkBackend(pricing=pricing)
     executors = default_registry(review_backend=backend)
