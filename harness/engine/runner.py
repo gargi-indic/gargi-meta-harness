@@ -10,7 +10,7 @@ IDs are deterministic: run ``{repo}#{issue}@{n}``, step ``{run}/{node}/{visit}``
 import asyncio
 import copy
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -30,6 +30,7 @@ from harness.github.ledger import LedgerTooLarge, render_event, render_ledger
 from harness.github.outbox import Outbox
 from harness.llm.backend import ReviewBackend
 from harness.ops.costs import budget_state, mark_budget, recorded_total, usage_rev
+from harness.ops.notifier import Notification
 from harness.playbook.models import JoinNode, Node, ParallelNode, Playbook
 from harness.playbook.templating import Context, IssueCtx, PrCtx, RunCtx
 from harness.secrets import redact
@@ -192,6 +193,7 @@ class Runner:
         clock: Callable[[], float] = time.time,
         crash_after: str | None = None,
         playbooks: Mapping[str, Playbook] | None = None,
+        notify: Callable[[Notification], Awaitable[None]] | None = None,
     ) -> None:
         if crash_after is not None and crash_after not in CRASH_POINTS:
             raise ValueError(f"unknown crash point {crash_after!r}; known: {', '.join(CRASH_POINTS)}")
@@ -203,6 +205,8 @@ class Runner:
         self.repo_configs = repo_configs or {}
         self.clock = clock
         self.crash_after = crash_after
+        # The notification service's ``submit`` (set by the daemon when notifications are enabled).
+        self.notify = notify
         # Fallback playbook lookup (by playbook id) for runs whose context carries no playbook copy,
         # for example runs rebuilt from a ledger snapshot.
         self.playbooks = playbooks or {}
@@ -291,6 +295,7 @@ class Runner:
             template=self._template_ctx(run, step),
             clock=self.clock,
             crash=self._crash,
+            notify=self.notify,
         )
 
     def _new_step(self, work: _Work, node_id: str, visit: int, prev: dict[str, Any] | None) -> str:

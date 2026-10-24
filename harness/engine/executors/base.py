@@ -6,7 +6,7 @@ never to restart. Executors never write ``set_labels`` / ``edit_issue_body`` / `
 the runner owns the mirroring to GitHub.
 """
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -15,6 +15,7 @@ from harness.config import RepoConfig
 from harness.github.client import GitHub
 from harness.github.outbox import Outbox
 from harness.llm.backend import ReviewBackend
+from harness.ops.notifier import Notification
 from harness.playbook.models import Node, Playbook
 from harness.playbook.templating import Context
 from harness.store.db import Store
@@ -55,6 +56,8 @@ class ExecContext:
     clock: Callable[[], float]
     # Crash-injection hook: ``crash("name")`` raises SimulatedCrash when the runner was armed with that name.
     crash: Callable[[str], None] = field(default=_no_crash)
+    # Sends a notification through the notification service (None: notifications are not configured).
+    notify: Callable[[Notification], Awaitable[None]] | None = None
 
 
 class Executor(Protocol):

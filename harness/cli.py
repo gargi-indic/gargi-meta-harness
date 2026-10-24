@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import socket
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from harness.github.labels import ensure_harness_labels
 from harness.github.outbox import Outbox, OutboxOpFailed, ledger_mirror_key
 from harness.lock import LockHeld
 from harness.ops.costs import UsageRepo, parse_since
+from harness.ops.notifier import TITLE, Notification, make_notifier
 from harness.planner.materialize import MaterializeContext, MaterializeError, materialize, plan_run_key
 from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
 from harness.planner.plan_gate import (
@@ -1108,6 +1110,18 @@ def _serve_demo(port: int | None, no_open: bool) -> None:
     HarnessServer(build_server_config(web, listen_port), bus=web.state.bus, on_started=announce).run()
 
 
+@app.command("notify-test")
+def notify_test(
+    kind: str = typer.Option("plan_approval", "--kind", help="Notification kind to send."),
+) -> None:
+    """Send a test notification with the configured backend (works while notifications are disabled)."""
+    cfg = load_global()
+    notifier = make_notifier(cfg.notifications.backend)
+    note = Notification(title=TITLE, body="Test notification", kind=kind, key=f"test:{uuid.uuid4()}")
+    asyncio.run(notifier.send(note))
+    print(f"sent via {type(notifier).__name__}")
+
+
 @app.command()
 def serve(
     port: int = typer.Option(None, "--port", help="Port to listen on (default: the global config port)."),
@@ -1140,7 +1154,13 @@ def serve(
     token = generate_token()
     gh, gh_token = _serve_github(store)
     web = create_app(
-        store=store, config=cfg, token=token, web_dist=default_web_dist(), port=listen_port, gh=gh
+        store=store,
+        config=cfg,
+        token=token,
+        web_dist=default_web_dist(),
+        port=listen_port,
+        gh=gh,
+        notifications=True,
     )
     web.state.gh_token = gh_token
     url = f"http://127.0.0.1:{listen_port}/auth?token={token}"
