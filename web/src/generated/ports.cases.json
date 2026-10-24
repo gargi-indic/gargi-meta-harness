@@ -199,7 +199,8 @@
       "max_visits": null,
       "kind": "join",
       "mode": "all",
-      "inputs": null
+      "inputs": null,
+      "rubric": null
     },
     "ports": [
       "done",

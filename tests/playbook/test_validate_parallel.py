@@ -83,7 +83,21 @@ def test_parallel_cycle_with_max_visits_is_fine():
     assert "parallel_cycle_without_max_visits" not in codes(yaml)
 
 
-def test_select_mode_is_a_warning_pointing_at_m3_8():
-    issues = validate(load_playbook(VALID.replace("mode: all", "mode: select")))
-    assert [(i.code, i.severity) for i in issues] == [("join_select_not_implemented", "warning")]
-    assert "M3.8" in issues[0].message
+def test_select_join_with_two_inputs_and_a_rubric_is_valid():
+    yaml = VALID.replace("mode: all", "mode: select, rubric: [tests present, small diff]")
+    assert validate(load_playbook(yaml)) == []
+
+
+def test_select_join_with_a_single_input_is_an_error():
+    yaml = """
+apiVersion: harness/v1
+id: test
+nodes:
+  n1: {kind: escalate}
+  j1: {kind: join, mode: select}
+edges:
+  "n1.resolved": j1
+  "j1.done": "@done"
+  "j1.failed": "@failed"
+"""
+    assert codes(yaml) == ["join_min_inputs"]

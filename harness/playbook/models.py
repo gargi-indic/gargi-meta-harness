@@ -133,6 +133,8 @@ class JoinNode(NodeBase):
     kind: Literal["join"] = "join"
     mode: Literal["all", "any", "select"]
     inputs: list[str] | None = None
+    # Judging criteria for ``mode: select``; the selector prompt lists them after its built-in rubric.
+    rubric: list[str] | None = None
 
     def ports(self) -> tuple[str, ...]:
         return self._add_exhausted(("done", "failed"))

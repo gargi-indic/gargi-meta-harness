@@ -440,6 +440,21 @@
           ],
           "default": null,
           "title": "Inputs"
+        },
+        "rubric": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rubric"
         }
       },
       "required": [

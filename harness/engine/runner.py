@@ -21,12 +21,14 @@ from harness.adapters.base import AdapterRegistry, SessionRef
 from harness.config import RepoConfig
 from harness.engine.control import apply_pending
 from harness.engine.executors.base import Done, ExecContext, ExecutorRegistry, Waiting
+from harness.engine.executors.join_select import select_join
 from harness.engine.model import TERMINAL_STATUSES, to_snapshot
 from harness.github.client import GitHub
 from harness.github.control_table import ControlRow
 from harness.github.labels import HARNESS_LABELS
 from harness.github.ledger import LedgerTooLarge, render_event, render_ledger
 from harness.github.outbox import Outbox
+from harness.llm.backend import ReviewBackend
 from harness.playbook.models import JoinNode, Node, ParallelNode, Playbook
 from harness.playbook.templating import Context, IssueCtx, PrCtx, RunCtx
 from harness.secrets import redact
@@ -111,19 +113,31 @@ def _step_failed(step: StepRow) -> bool:
 
 
 class JoinExecutor:
-    """Built-in executor for ``join`` nodes: ``all`` and ``any`` modes (``select`` is M3)."""
+    """Built-in executor for ``join`` nodes: ``all``, ``any`` and ``select`` (see ``join_select``)."""
+
+    def __init__(self, select_backend: ReviewBackend | None = None) -> None:
+        self.select_backend = select_backend
 
     async def advance(self, step: StepRow, node: Node, ctx: ExecContext) -> Waiting | Done:
         if not isinstance(node, JoinNode):
             raise TypeError(f"JoinExecutor cannot run a {node.kind!r} node")
-        if node.mode == "select":
-            raise NotImplementedError("join mode 'select' is implemented in M3")
         names = join_inputs(ctx.playbook, step.node_id, node)
         steps = steps_for_run(ctx.store, ctx.run.id)
         latest = {n: _latest_step(steps, n) for n in names}
         complete = {n: s for n, s in latest.items() if s is not None and s.status in ("done", "failed")}
         failed = [n for n, s in complete.items() if _step_failed(s)]
         good = {n: (s.output or {}) for n, s in complete.items() if n not in failed}
+        if node.mode == "select":
+            if len(complete) < len(names):
+                return Waiting(poll_after=0.0)
+            return await select_join(
+                step,
+                node,
+                ctx,
+                candidates={n: complete[n] for n in good},
+                failed=failed,
+                backend=self.select_backend,
+            )
         if node.mode == "all":
             if failed:
                 return Done(
@@ -189,7 +203,7 @@ class Runner:
         self._playbook_cache: dict[str, Playbook] = {}
         self._warned_missing: set[str] = set()
         if "join" not in self.executors.kinds():
-            self.executors.register("join", JoinExecutor())
+            self.executors.register("join", JoinExecutor(select_backend=self.executors.select_backend))
 
     # ---- small helpers ------------------------------------------------------------------------------
 
