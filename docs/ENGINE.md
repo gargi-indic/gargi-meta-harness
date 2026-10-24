@@ -32,4 +32,5 @@
   the winner's PR, which the runner copies into the run context, so the following `ci` / `pr_review` / `merge` nodes
   work on the winner unchanged. `JoinExecutor` gets its judge from `ExecutorRegistry.select_backend`
   (`default_registry(review_backend=...)` sets it); without one, a select join with 2+ candidates fails the step.
+- `harness/playbooks/tournament.yaml` uses this: `fork` -> `a`/`b` -> `pick` (select). A node after the join continues the winner's session with `session: "{{ pick.winner }}"` (the agent executor renders `session` as a template).
 - The run is done only when routing reaches `@done`; a run cancel (`Runner.cancel`) cancels every waiting session.

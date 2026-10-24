@@ -188,13 +188,20 @@
           "type": "array"
         },
         "default": {
-          "type": "string",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
           "title": "Default"
         }
       },
       "required": [
-        "cases",
-        "default"
+        "cases"
       ],
       "title": "BranchNode",
       "type": "object"

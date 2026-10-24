@@ -37,7 +37,7 @@ export type Kind4 = "branch";
 export type When = string;
 export type Port = string;
 export type Cases = BranchCase[];
-export type Default = string;
+export type Default = string | null;
 export type Title5 = string | null;
 export type MaxVisits5 = number | null;
 export type Kind5 = "parallel";
@@ -142,7 +142,7 @@ export interface BranchNode {
   max_visits?: MaxVisits4;
   kind?: Kind4;
   cases: Cases;
-  default: Default;
+  default?: Default;
 }
 export interface BranchCase {
   when: When;

@@ -132,6 +132,17 @@ def evaluate(expr: str, ctx: Context, *, path: str = "") -> bool:
     return result
 
 
+def check_expression(expr: str, *, path: str = "") -> None:
+    """Compile a condition without running it. Raises TemplateError on a syntax error."""
+    text = expr.strip()
+    if text.startswith("{{") and text.endswith("}}"):
+        text = text[2:-2]
+    try:
+        _env().compile_expression(text, undefined_to_none=False)
+    except Exception as exc:
+        raise _wrap(exc, path) from exc
+
+
 def template_variables(template: str, *, path: str = "") -> set[str]:
     """Names a template reads from the namespace (for the editor and validator)."""
     try:
