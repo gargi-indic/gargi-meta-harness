@@ -85,6 +85,7 @@ def _label_value(labels: list[str], prefix: str) -> str | None:
 class StartGate(Protocol):
     def reason(self) -> str | None: ...
 
+
 class Dispatcher:
     def __init__(
         self,

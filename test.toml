@@ -1,9 +1,0 @@
-port = 7777
-data_dir = "/home/jules/.gargi-harness"
-env_files = ["/home/jules/.config/jules/env", "/home/jules/.config/gargi-harness/env"]
-
-[notifications]
-enabled = false
-kinds = ["plan_approval", "merge_approval", "gate", "question", "escalation", "handoff", "budget"]
-backend = "auto"
-dedupe_window_s = 60
