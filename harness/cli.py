@@ -8,6 +8,7 @@ import signal
 import socket
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import typer
@@ -23,8 +24,9 @@ from harness.engine.model import TERMINAL_STATUSES
 from harness.github.client import GitHub, GitHubError
 from harness.github.commands import allowed_logins, decide, default_retry_node, resolve_gate
 from harness.github.labels import ensure_harness_labels
-from harness.github.outbox import Outbox, ledger_mirror_key
+from harness.github.outbox import Outbox, OutboxOpFailed, ledger_mirror_key
 from harness.lock import LockHeld
+from harness.planner.materialize import MaterializeContext, MaterializeError, materialize, plan_run_key
 from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
 from harness.planner.plan_gate import (
     APPROVED_LABEL,
@@ -34,6 +36,7 @@ from harness.planner.plan_gate import (
     label_cursor,
     record_plan_approval,
 )
+from harness.planner.proposal import ProposedPlan
 from harness.playbook.load import PlaybookError, builtin_playbooks, load_playbook
 from harness.playbook.models import Playbook
 from harness.playbook.validate import validate
@@ -788,6 +791,15 @@ plan_app = typer.Typer(help="Campaign plan commands")
 app.add_typer(plan_app, name="plan")
 
 
+def _stored_config(store: Store, target: str) -> RepoConfig:
+    """The repo config of the last sync (the defaults when there is none or it cannot be read)."""
+    stored = get_repo(store, target)
+    try:
+        return RepoConfig.model_validate((stored or {}).get("config") or {})
+    except ValueError:
+        return RepoConfig()
+
+
 def _plan_target(
     store: Store, repo: str | None, control_issue: int | None
 ) -> tuple[str, int | None, list[str]]:
@@ -795,11 +807,7 @@ def _plan_target(
     target = _single_repo(repo)
     if not target:
         raise _fail("give --repo owner/name")
-    stored = get_repo(store, target)
-    try:
-        config = RepoConfig.model_validate((stored or {}).get("config") or {})
-    except ValueError:
-        config = RepoConfig()
+    config = _stored_config(store, target)
     return target, control_issue if control_issue is not None else config.control_issue, config.command_users
 
 
@@ -921,6 +929,68 @@ def plan_approve(
     try:
         asyncio.run(_with_github(gh, _approve))
     except (PlanDocError, GitHubError, ValueError) as exc:
+        raise _fail(f"error: {redact(_error_message(exc))}") from None
+    finally:
+        store.close()
+
+
+async def _known_playbooks(gh: GitHub, target: str, plan: ProposedPlan) -> set[str]:
+    """The built-in playbook ids plus those of the plan that the repo has under ``.harness/playbooks/``."""
+    known = set(builtin_playbooks())
+    for playbook_id in dict.fromkeys(issue.playbook for issue in plan.issues):
+        if playbook_id not in known and re.fullmatch(r"[A-Za-z0-9_.-]+", playbook_id):
+            if await gh.file_text(target, f".harness/playbooks/{playbook_id}.yaml") is not None:
+                known.add(playbook_id)
+    return known
+
+
+@plan_app.command("create")
+def plan_create(
+    proposal: str = typer.Option(..., "--proposal", help="JSON file with a ProposedPlan."),
+    repo: str = typer.Option(None, "--repo"),
+    control_issue: int = typer.Option(None, "--control-issue"),
+    run_key: str = typer.Option(
+        None, "--run-key", help="Names this materialization (default: from the plan)."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be created."),
+) -> None:
+    """Create the epic, its sub-issues, links and labels from a proposed plan. Repeating it creates nothing twice."""
+    try:
+        plan = ProposedPlan.model_validate_json(Path(proposal).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise _fail(f"error: cannot read {proposal}: {exc.strerror or exc}") from None
+    except ValueError as exc:
+        raise _fail(f"error: {proposal} is not a valid proposed plan: {redact(str(exc))}") from None
+    store = _open_store()
+    gh = _make_github()
+
+    async def _create() -> None:
+        target, control, _ = _plan_target(store, repo, control_issue)
+        config = _stored_config(store, target)
+        ctx = MaterializeContext(
+            repo=target,
+            gh=gh,
+            outbox=Outbox(store, gh),
+            store=store,
+            control_issue=control,
+            run_key=run_key or plan_run_key(plan),
+            agents=[name for name, agent in config.agents.items() if agent.enabled],
+            playbooks=await _known_playbooks(gh, target, plan),
+        )
+        result = await materialize(plan, ctx, dry_run=dry_run)
+        verb = "would create" if dry_run else "created"
+        print(f"run:      {ctx.run_key}" + (" (dry run, nothing written)" if dry_run else ""))
+        print("epic:     " + (f"#{result.epic_number}" if result.epic_number else "(not created yet)"))
+        print(f"{verb}:   {', '.join(result.created) or '-'}")
+        print(f"reused:   {', '.join(result.reused) or '-'}")
+        print(f"links:    {result.links_created} {'to create' if dry_run else 'created'}")
+        print(f"labels:   {', '.join(result.labels_ensured) or '-'}")
+        for key, number in result.issues.items():
+            print(f"  {key} -> #{number}")
+
+    try:
+        asyncio.run(_with_github(gh, _create))
+    except (GitHubError, MaterializeError, OutboxOpFailed, ValueError) as exc:
         raise _fail(f"error: {redact(_error_message(exc))}") from None
     finally:
         store.close()

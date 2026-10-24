@@ -11,6 +11,7 @@ HARNESS_LABELS = {
     "harness:done": ("0e8a16", "Successfully completed"),
     "harness:failed": ("d93f0b", "Failed and needs attention"),
     "harness:plan-approved": ("0e8a16", "The campaign plan is approved (added by the repo owner)"),
+    "harness:planned": ("1d76db", "Created by the harness from an approved plan"),
 }
 
 

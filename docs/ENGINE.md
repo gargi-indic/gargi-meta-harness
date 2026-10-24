@@ -43,3 +43,12 @@
 - Signals (owner or `command_users` only): the label `harness:plan-approved` on the control issue (added after the plan's last change), the merge of the PR that last modified the plan file, or `harness plan approve`. The executor turns a fresh signal into the ledger record and resolves `approved` on the next poll.
 - If the plan's sha differs from the approved `plan_sha` the status is `STALE`: the gate asks again (one request comment per sha, label `harness:needs-you`) and nothing already created is cancelled. A label event is used up by the record it produced, so approving a changed plan needs a new label event (remove and re-add the label) or a merged PR for the new text.
 - The inbox cannot approve a campaign plan item: it answers 422 and points to the label or the CLI.
+
+## Creating the issues of a plan (`harness plan create`)
+
+- `harness.planner.materialize.materialize(plan, ctx)` turns a validated `ProposedPlan` into an epic, sub-issues (attached to the epic), `blocked_by` links and labels (`agent:<x>`, `playbook:<y>`, `harness:planned`, `harness:ready` or `harness:blocked`). Issues are created blockers first.
+- Every write goes through the outbox (new ops `create_issue`, `add_sub_issue`, `add_blocked_by`, `ensure_label`; the control table rows use `edit_issue_body`, the event comment `add_comment`). `Outbox.settle(op_ids)` drains through `drain_once` and sleeps while the per-minute window is full, so the throttle applies; the number and id of a created issue are read back with `Outbox.result(op_id)`.
+- GitHub is the store. Each issue body ends with `<!-- harness:planned run=<run_key> key=<key> -->` (the epic uses key `@epic`). Before creating, `materialize` lists the issues labelled `harness:planned` and reuses the ones whose marker matches; the `create_issue` op repeats that search when it is sent, so an op left queued by a crash cannot duplicate an issue. Links are read first and only missing ones are added. A finished run that is repeated makes no write call.
+- `run_key` is chosen by the caller (`harness plan create` derives it from the plan's sha256 unless `--run-key` is given): the same key resumes, a new key is a new materialization.
+- Bodies keep the proposed text, replace its `Acceptance criteria` section by `- [ ]` boxes from `acceptance` (the merge executor ticks them), and add a `paths: a/, b.py` line that the dispatcher's `parse_path_hints` reads.
+- With a control issue, one table row per sub-issue (anchored upsert) and one `**date · #<epic> planned.**` comment are added, each only if missing.

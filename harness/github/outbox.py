@@ -3,7 +3,7 @@ import json
 import re
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import timedelta
 from typing import Any, Literal, cast
 
@@ -13,9 +13,10 @@ from harness.github.client import GitHub
 from harness.github.control_table import ControlRow, upsert_row
 from harness.github.labels import ensure_harness_labels
 from harness.github.ledger import find_ledger, ledger_summary, parse_ledger, render_ledger
+from harness.github.planned import find_by_marker
 from harness.secrets import redact
 from harness.store.db import Store
-from harness.store.repo import append_event, set_meta
+from harness.store.repo import append_event, get_meta, set_meta
 
 OpType = Literal[
     "add_comment",
@@ -29,6 +30,10 @@ OpType = Literal[
     "close_issue",
     "create_pull",
     "tick_boxes",
+    "create_issue",
+    "add_sub_issue",
+    "add_blocked_by",
+    "ensure_label",
 ]
 
 
@@ -94,7 +99,42 @@ class TickBoxesPayload(OutboxPayload):
     issue: int
 
 
+class CreateIssuePayload(OutboxPayload):
+    title: str
+    body: str
+    labels: list[str] = []
+    # With both set, the issue is looked up first among the issues labelled ``dedupe_label`` and only created
+    # when none of them ends with ``marker``: a send that is repeated after a crash creates nothing twice.
+    marker: str | None = None
+    dedupe_label: str | None = None
+
+
+class AddSubIssuePayload(OutboxPayload):
+    issue: int  # the parent's number
+    sub_issue_id: int  # the child's id (not its number)
+
+
+class AddBlockedByPayload(OutboxPayload):
+    issue: int  # the blocked issue's number
+    blocker_id: int  # the blocker's id (not its number)
+
+
+class EnsureLabelPayload(OutboxPayload):
+    name: str
+    color: str | None = None
+    description: str | None = ""
+
+
 MERGED_LEDGER_SUMMARY = "Harness control ledger."
+
+
+class OutboxOpFailed(RuntimeError):
+    """An op that a caller waited for did not go through; it is retried later (or has failed for good)."""
+
+
+def op_result_key(op_id: int) -> str:
+    """The ``meta`` row that holds what a sent op returned (JSON); see :meth:`Outbox.result`."""
+    return f"outbox:result:{op_id}"
 
 
 def ledger_mirror_key(repo: str, issue: int, key: str) -> str:
@@ -122,6 +162,10 @@ _PAYLOAD_MODELS: dict[OpType, type[BaseModel]] = {
     "close_issue": CloseIssuePayload,
     "create_pull": CreatePullPayload,
     "tick_boxes": TickBoxesPayload,
+    "create_issue": CreateIssuePayload,
+    "add_sub_issue": AddSubIssuePayload,
+    "add_blocked_by": AddBlockedByPayload,
+    "ensure_label": EnsureLabelPayload,
 }
 
 
@@ -221,7 +265,7 @@ class Outbox:
             self._record_send()  # Count attempts in the sliding window
 
             try:
-                await self._process_op(op, payload)
+                result = await self._process_op(op, payload)
 
                 with self.store.tx():
                     cursor = self.store.execute(
@@ -234,6 +278,8 @@ class Outbox:
                     )
                     if cursor.rowcount > 0:
                         sent_count += 1
+                        if result is not None:
+                            set_meta(self.store, op_result_key(row_id), json.dumps(result, sort_keys=True))
             except Exception as e:
                 attempts += 1
                 last_error = f"{type(e).__name__}: {e}"
@@ -281,7 +327,55 @@ class Outbox:
 
         return sent_count
 
-    async def _process_op(self, op: OpType, payload: dict[str, Any]) -> None:
+    def result(self, op_id: int) -> dict[str, Any] | None:
+        """What the sent op ``op_id`` returned (for example ``{"number": 7, "id": 99}`` for ``create_issue``).
+
+        None while it is unsent, for ops that return nothing, and when another writer sent it with a different
+        payload. A caller that needs the value then looks the thing up on GitHub instead.
+        """
+        raw = get_meta(self.store, op_result_key(op_id))
+        return json.loads(raw) if raw else None
+
+    def _throttle_delay(self) -> float:
+        """Seconds until the sliding window has room for another send."""
+        if not self._send_times:
+            return 0.0
+        return max(self._send_times[0] + 60 - self.clock(), 0.0) + 0.001
+
+    async def settle(self, op_ids: Collection[int]) -> None:
+        """Drain until every op in ``op_ids`` is sent, sleeping (``self.sleep``) whenever the window is full.
+
+        This is the throttled path for callers that need a result before they go on: it only calls
+        :meth:`drain_once`, so ``per_minute`` and the client's write spacing apply as always. If one of the ops
+        fails, it raises :class:`OutboxOpFailed` instead of waiting out the backoff; the row stays queued and a
+        daemon retries it, and a caller that re-enqueues the same ``coalesce_key`` resets it.
+        """
+        wanted = list(dict.fromkeys(op_ids))
+        if not wanted:
+            return
+        marks = ",".join("?" for _ in wanted)
+        while True:
+            await self.drain_once()
+            rows = {
+                row["id"]: row
+                for row in self.store.query(
+                    f"SELECT id, op, status, attempts, last_error FROM outbox WHERE id IN ({marks})",
+                    tuple(wanted),
+                )
+            }
+            waiting = False
+            for op_id in wanted:
+                row = rows.get(op_id)
+                if row is None:
+                    raise OutboxOpFailed(f"outbox op {op_id} does not exist")
+                if row["status"] == "failed" or (row["status"] == "pending" and row["attempts"] > 0):
+                    raise OutboxOpFailed(f"outbox op {op_id} ({row['op']}) failed: {row['last_error']}")
+                waiting = waiting or row["status"] != "sent"
+            if not waiting:
+                return
+            await self.sleep(self._throttle_delay())
+
+    async def _process_op(self, op: OpType, payload: dict[str, Any]) -> dict[str, Any] | None:
         repo = payload["repo"]
         if op == "add_comment":
             await self.gh.add_comment(repo, payload["issue"], payload["body"])
@@ -340,6 +434,37 @@ class Outbox:
             new_body = tick_boxes(current_body)
             if new_body != current_body:
                 await self.gh.update_issue(repo, issue, body=new_body)
+        elif op == "create_issue":
+            return await self._create_issue(repo, payload)
+        elif op == "add_sub_issue":
+            parent, child = payload["issue"], payload["sub_issue_id"]
+            if any(sub.get("id") == child for sub in await self.gh.sub_issues(repo, parent)):
+                return {"added": False}
+            await self.gh.add_sub_issue(repo, parent, child)
+            return {"added": True}
+        elif op == "add_blocked_by":
+            blocked, blocker = payload["issue"], payload["blocker_id"]
+            if any(dep.get("id") == blocker for dep in await self.gh.blocked_by(repo, blocked)):
+                return {"added": False}
+            await self.gh.add_blocked_by(repo, blocked, blocker)
+            return {"added": True}
+        elif op == "ensure_label":
+            created = await self.gh.ensure_label(
+                repo, payload["name"], color=payload.get("color"), description=payload.get("description")
+            )
+            return {"created": created is not None}
+        return None
+
+    async def _create_issue(self, repo: str, payload: dict[str, Any]) -> dict[str, Any]:
+        marker, dedupe_label = payload.get("marker"), payload.get("dedupe_label")
+        if marker and dedupe_label:
+            found = find_by_marker(await self.gh.issues(repo, state="all", labels=dedupe_label), marker)
+            if found is not None:
+                return {"number": found["number"], "id": found["id"], "existing": True}
+        created = await self.gh.create_issue(
+            repo, payload["title"], body=payload["body"], labels=payload["labels"]
+        )
+        return {"number": created["number"], "id": created["id"], "existing": False}
 
     async def _merge_ledger(self, repo: str, issue: int, key: str, value: dict[str, Any] | None) -> None:
         """Set (or, for None, drop) one top-level key of the issue's ledger snapshot, keeping every other key.

@@ -330,6 +330,9 @@ class GitHub:
                 raise
             return None
 
+    async def labels(self, repo: str) -> list[dict[str, Any]]:
+        return [label async for label in self.paginate(f"repos/{repo}/labels")]
+
     async def parent(self, repo: str, number: int) -> dict[str, Any] | None:
         try:
             return await self.get(f"repos/{repo}/issues/{number}/parent")
