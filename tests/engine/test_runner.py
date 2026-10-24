@@ -223,15 +223,6 @@ async def test_join_any_fires_on_first_input_and_ignores_the_late_one(env):
     assert ex.step_calls("after") == 5
 
 
-async def test_join_select_is_not_implemented_and_fails_the_step(env):
-    pb = make_playbook({"j": {"kind": "join", "mode": "select", "inputs": ["j"]}}, {"j.failed": "@failed"})
-    runner = env.runner(Scripted({}))
-    run_id = runner.start_run(REPO, make_issue(), pb)
-    await runner.tick()
-    assert env.run(run_id).status == "failed"
-    assert "NotImplementedError" in env.events("executor_error")[0]["data"]["error"]
-
-
 async def test_join_executor_is_registered_by_the_runner_unless_provided(env):
     registry = registry_for(Scripted({}))
     env.runner(executors=registry)

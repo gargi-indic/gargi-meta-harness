@@ -125,15 +125,6 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
                     )
 
         if node.kind == "join":
-            if node.mode == "select":
-                issues.append(
-                    PlaybookIssue(
-                        f"nodes.{node_id}.mode",
-                        "join_select_not_implemented",
-                        "join mode 'select' is not implemented yet (planned in M3.8); the join step will fail",
-                        severity="warning",
-                    )
-                )
             sources = _join_sources(pb, node_id, node)
             if all(src in pb.nodes for src in sources) and len(sources) < 2:
                 issues.append(

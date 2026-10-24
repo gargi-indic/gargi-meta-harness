@@ -47,6 +47,7 @@ export type MaxVisits6 = number | null;
 export type Kind6 = "join";
 export type Mode = "all" | "any" | "select";
 export type Inputs1 = string[] | null;
+export type Rubric = string[] | null;
 export type Title7 = string | null;
 export type MaxVisits7 = number | null;
 export type Kind7 = "decompose";
@@ -159,6 +160,7 @@ export interface JoinNode {
   kind?: Kind6;
   mode: Mode;
   inputs?: Inputs1;
+  rubric?: Rubric;
 }
 export interface DecomposeNode {
   title?: Title7;

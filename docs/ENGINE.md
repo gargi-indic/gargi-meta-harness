@@ -16,6 +16,20 @@
   `failed`/`cancelled`.
 - `mode: any` fires on the first successful input. Slower branches are left running and are not cancelled; their
   results are ignored by the join.
-- `mode: select` (a judge picks one branch) is M3.8. The validator warns (`join_select_not_implemented`) and the
-  executor raises `NotImplementedError`, which fails the step.
+- `mode: select` (a judge picks one branch) waits like `all` for every input, then considers only the branches that
+  finished without failing and produced a PR (`output.pr`). No candidate: outcome `failed`. One candidate: it wins
+  without a model call. Several: `select_candidate` (`harness/llm/selector.py`) asks the review backend, with the
+  same read-only tools, for `{winner, ranking, rationale, per_candidate}`, using the built-in rubric (acceptance
+  criteria, scope, tests, smallest diff, CI) plus the node's optional `rubric: [..]`. Invalid JSON is retried once.
+  If the reply stays invalid or names an unknown winner, the fallback picks the candidate with passing CI, then the
+  smallest diff (additions + deletions), then the alphabetically first node name.
+- After choosing, the join step stores the selection in its own `output`, then comments on the winner, and for each
+  loser comments (`Not selected in tournament for #N (winner: PR #M): ...`), closes the PR and, when
+  `merge.delete_branch` is set, deletes its branch. Comments carry `<!-- harness:select run=<id> step=<id> -->` and
+  are skipped when present, closed PRs are not closed again, so a crash between choosing and closing resumes from
+  the stored selection with no second model call, comment or close.
+- The select output is `{winner, winner_pr, losers: [{node, pr, branch}], pr, rationale, ranking, failed}`. `pr` is
+  the winner's PR, which the runner copies into the run context, so the following `ci` / `pr_review` / `merge` nodes
+  work on the winner unchanged. `JoinExecutor` gets its judge from `ExecutorRegistry.select_backend`
+  (`default_registry(review_backend=...)` sets it); without one, a select join with 2+ candidates fails the step.
 - The run is done only when routing reaches `@done`; a run cancel (`Runner.cancel`) cancels every waiting session.

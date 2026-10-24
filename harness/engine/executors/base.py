@@ -14,6 +14,7 @@ from harness.adapters.base import AdapterRegistry
 from harness.config import RepoConfig
 from harness.github.client import GitHub
 from harness.github.outbox import Outbox
+from harness.llm.backend import ReviewBackend
 from harness.playbook.models import Node, Playbook
 from harness.playbook.templating import Context
 from harness.store.db import Store
@@ -61,7 +62,9 @@ class Executor(Protocol):
 
 
 class ExecutorRegistry:
-    def __init__(self) -> None:
+    def __init__(self, select_backend: ReviewBackend | None = None) -> None:
+        # The judge that the Runner gives the built-in join executor for ``select`` mode.
+        self.select_backend = select_backend
         self._executors: dict[str, Executor] = {}
 
     def register(self, kind: str, executor: Executor) -> None:
