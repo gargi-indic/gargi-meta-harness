@@ -9,7 +9,7 @@ import socket
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import typer
 import yaml
@@ -526,11 +526,14 @@ async def _start_or_continue(
     playbook_flag: str | None,
     agent_flag: str | None,
     issue: IssueRow | None,
+    inputs: dict[str, str] | None = None,
 ) -> str:
     """The id of the run to drive. Raises ValueError with a one-line message when it cannot be started."""
     existing = _active_run(application, repo, number)
     if existing is not None:
         print(f"continuing {existing.id}")
+        if inputs:
+            print("note: --input is ignored, the run already has its inputs")
         return existing.id
     if issue is None:
         raise ValueError(f"issue #{number} not found in {repo}")
@@ -545,7 +548,9 @@ async def _start_or_continue(
         known = ", ".join(application.adapters.names())
         raise ValueError(f"agent {agent!r} is not available (known: {known}); is its API key set?")
     try:
-        run_id = application.runner.start_run(repo, issue, playbook, playbook_sha=sha, agent=agent)
+        run_id = application.runner.start_run(
+            repo, issue, playbook, playbook_sha=sha, agent=agent, inputs=inputs
+        )
     except RunExists as exc:
         print(f"continuing {exc.run_id}")
         return exc.run_id
@@ -587,6 +592,7 @@ async def _run_command(
     playbook_flag: str | None,
     agent_flag: str | None,
     max_ticks: int | None,
+    inputs: dict[str, str] | None = None,
 ) -> int:
     try:
         report = await sync_repo(application.gh, application.store, repo)
@@ -595,7 +601,7 @@ async def _run_command(
             print(f"warning: {redact(error)}")
         issue = get_issue(application.store, repo, number)
         last_event = _last_event_id(application)
-        run_id = await _start_or_continue(application, repo, number, playbook_flag, agent_flag, issue)
+        run_id = await _start_or_continue(application, repo, number, playbook_flag, agent_flag, issue, inputs)
         run = await _drive(application, run_id, max_ticks, last_event)
         if run.status == "needs-you":
             _print_needs_you(application, run_id)
@@ -608,6 +614,24 @@ async def _run_command(
         return 1
     finally:
         await application.aclose()
+
+
+INPUT_HELP = (
+    "A run input for the playbook, for example plan_path=docs/PLAN.md; repeat it for several. "
+    "Used only when a new run starts."
+)
+
+
+def parse_inputs(items: list[str]) -> dict[str, str]:
+    """``["a=1", "b=x=y"]`` -> ``{"a": "1", "b": "x=y"}``; a later ``--input`` for the same key wins."""
+    inputs: dict[str, str] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise _fail(f"error: --input {item!r} must look like KEY=VALUE")
+        inputs[key] = value
+    return inputs
 
 
 def _build(**kwargs: Any) -> App:
@@ -624,10 +648,12 @@ def run(
     playbook: str = typer.Option(None, "--playbook", help="Playbook id (default: label, then repo default)."),
     agent: str = typer.Option(None, "--agent", help="Agent name (default: label, then repo default)."),
     max_ticks: int = typer.Option(None, "--max-ticks", min=1, help="Stop after this many ticks."),
+    inputs: Annotated[list[str] | None, typer.Option("--input", metavar="KEY=VALUE", help=INPUT_HELP)] = None,
 ) -> None:
     """Start (or continue) a run for an issue and drive it in the foreground."""
+    parsed = parse_inputs(inputs or [])
     application = _build()
-    raise typer.Exit(asyncio.run(_run_command(application, repo, issue, playbook, agent, max_ticks)))
+    raise typer.Exit(asyncio.run(_run_command(application, repo, issue, playbook, agent, max_ticks, parsed)))
 
 
 @app.command()

@@ -1,11 +1,20 @@
 """Decompose executor: turn the campaign's plan into a stored ``ProposedPlan``, and optionally create the issues.
 
-``advance`` loads the plan (a repo file or an issue, the same loader as the plan gate), then looks for a proposal of
-this run for this plan sha: the local mirror first, then the proposal comments on the control issue
-(``harness.planner.proposal_store``). Only when there is none does it build the repository context and call
-``decompose()`` (one LLM conversation, repaired up to twice). The proposal is saved GitHub first before the step
-finishes, so a crash after the model answered re-advances into the stored proposal and never asks the model again.
-The plan sha is part of the key: a plan that changed since gets a new decomposition.
+``advance`` loads the plan (a repo file or an issue, the same loader as the plan gate), then looks for a proposal
+in this order (``harness.planner.proposal_store``; GitHub is the state store):
+
+1. the draft that the user edited and validated in the Planner for this plan sha (stored under a run id of the
+   Planner API, ``<repo>#planner-<token>``): it is copied to this run and used as it is, the model is not asked;
+2. the proposal of this run for this plan sha (the local mirror first, then the proposal comments on the control
+   issue);
+3. otherwise it builds the repository context and calls ``decompose()`` (one LLM conversation, repaired up to
+   twice).
+
+The proposal is saved GitHub first before the step finishes, so a crash after the model answered re-advances into
+the stored proposal and never asks the model again. The plan sha is part of the key: a plan that changed since gets
+a new decomposition. A node that is entered again after a rejection (visit 2 or later, ``create: false``) asks the
+model again with its ``guidance`` (which can use ``prev.correction``) unless a Planner draft exists; the new
+proposal is tagged with the step id, so a crash and re-advance of that same step reuses it.
 
 Outcomes (the node's ports):
 
@@ -29,15 +38,27 @@ from typing import Any
 from harness.adapters.base import Capabilities
 from harness.engine.executors.base import Done, ExecContext, Waiting
 from harness.github.client import GitHub, GitHubError
-from harness.github.outbox import OutboxOpFailed
+from harness.github.outbox import Outbox, OutboxOpFailed
 from harness.llm.backend import ReviewBackend
 from harness.llm.decomposer import DecompositionError, decompose
 from harness.planner.context import RepoContext, build_repo_context
-from harness.planner.materialize import MaterializeContext, MaterializeError, MaterializeResult, materialize
+from harness.planner.materialize import (
+    MaterializeContext,
+    MaterializeError,
+    MaterializeResult,
+    materialize,
+    plan_run_key,
+)
 from harness.planner.options import enabled_agents, repo_playbooks
 from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
 from harness.planner.proposal import ProposalIssue, ProposedPlan
-from harness.planner.proposal_store import StoredProposal, get_proposal, save_proposal, update_proposal
+from harness.planner.proposal_store import (
+    StoredProposal,
+    find_planner_draft,
+    get_proposal,
+    save_proposal,
+    update_proposal,
+)
 from harness.playbook.models import DecomposeNode, Playbook
 from harness.playbook.templating import TemplateError, render
 from harness.secrets import redact
@@ -47,6 +68,8 @@ MaterializeFn = Callable[[ProposedPlan, MaterializeContext], Awaitable[Materiali
 
 STATUS_PROPOSED = "proposed"
 STATUS_CREATED = "created"
+META_ADOPTED_FROM = "adopted_from"  # the Planner run id that a copied draft came from
+META_STEP = "step"  # the step that asked the model again after a rejection
 _ISSUE_SOURCE = re.compile(r"^#?(\d+)$")
 
 
@@ -61,21 +84,29 @@ class DecomposeExecutor:
         if ctx.gh is None or ctx.outbox is None or control_issue is None:
             return Done("failed", {"error": "a decompose node needs GitHub, an outbox and a control_issue"})
         try:
-            return await self._run(node, ctx, ctx.gh, control_issue)
+            return await self._run(step, node, ctx, ctx.gh, control_issue)
         except (PlanDocError, GitHubError, OutboxOpFailed, TemplateError, ValueError) as exc:
             return Done("failed", {"error": redact(f"{type(exc).__name__}: {exc}")})
 
-    async def _run(self, node: DecomposeNode, ctx: ExecContext, gh: GitHub, control_issue: int) -> Done:
+    async def _run(
+        self, step: StepRow, node: DecomposeNode, ctx: ExecContext, gh: GitHub, control_issue: int
+    ) -> Done:
         repo, run_id = ctx.run.repo, ctx.run.id
         outbox = ctx.outbox
         assert outbox is not None
         plan_doc = await _load_plan(node, ctx, gh)
 
-        stored = await get_proposal(
-            ctx.store, gh, repo=repo, control_issue=control_issue, run_id=run_id, plan_sha=plan_doc.sha
-        )
-        reused = stored is not None
         playbooks: dict[str, Playbook] | None = None
+        draft = await find_planner_draft(gh, repo=repo, control_issue=control_issue, plan_sha=plan_doc.sha)
+        if draft is not None:
+            stored = await _adopt(ctx, outbox, control_issue, plan_doc.sha, draft)
+        else:
+            stored = await get_proposal(
+                ctx.store, gh, repo=repo, control_issue=control_issue, run_id=run_id, plan_sha=plan_doc.sha
+            )
+            if stored is not None and _rejected_before(step, node, stored):
+                stored = None
+        reused = stored is not None
         if stored is None:
             playbooks = await _playbooks(gh, repo)
             guidance = None
@@ -102,15 +133,18 @@ class DecomposeExecutor:
                 plan_sha=plan_doc.sha,
                 proposal=proposal,
                 status=STATUS_PROPOSED,
+                meta={META_STEP: step.id} if step.visit > 1 and not node.create else None,
             )
 
         output = _output(stored, plan_doc, reused)
+        if draft is not None:
+            output["draft"] = draft.run_id
         if not node.create:
             return Done("proposed", output)
 
         if playbooks is None:
             playbooks = await _playbooks(gh, repo)
-        mctx = _materialize_context(node, ctx, control_issue, plan_doc.sha, sorted(playbooks))
+        mctx = _materialize_context(node, ctx, control_issue, stored, sorted(playbooks))
         try:
             result = await self.materialize_fn(stored.proposal, mctx)
         except MaterializeError as exc:
@@ -188,17 +222,62 @@ async def _playbooks(gh: GitHub, repo: str) -> dict[str, Playbook]:
     return await repo_playbooks(gh, repo)
 
 
+async def _adopt(
+    ctx: ExecContext, outbox: Outbox, control_issue: int, plan_sha: str, draft: StoredProposal
+) -> StoredProposal:
+    """Copy the Planner's draft to this run (once; the copy is kept while the draft stays the same).
+
+    The status of the copy starts at ``proposed`` and follows this run's creation like any proposal.
+    """
+    mine = await get_proposal(
+        ctx.store,
+        outbox.gh,
+        repo=ctx.run.repo,
+        control_issue=control_issue,
+        run_id=ctx.run.id,
+        plan_sha=plan_sha,
+    )
+    if (
+        mine is not None
+        and mine.proposal == draft.proposal
+        and mine.meta.get(META_ADOPTED_FROM) == draft.run_id
+    ):
+        return mine
+    return await save_proposal(
+        ctx.store,
+        outbox,
+        repo=ctx.run.repo,
+        control_issue=control_issue,
+        run_id=ctx.run.id,
+        plan_sha=plan_sha,
+        proposal=draft.proposal,
+        status=STATUS_PROPOSED,
+        meta={META_ADOPTED_FROM: draft.run_id},
+    )
+
+
+def _rejected_before(step: StepRow, node: DecomposeNode, stored: StoredProposal) -> bool:
+    """True when this step is a later visit that has not produced its own proposal yet: it must ask again."""
+    return step.visit > 1 and not node.create and stored.meta.get(META_STEP) != step.id
+
+
 def _materialize_context(
-    node: DecomposeNode, ctx: ExecContext, control_issue: int, plan_sha: str, playbooks: list[str]
+    node: DecomposeNode, ctx: ExecContext, control_issue: int, stored: StoredProposal, playbooks: list[str]
 ) -> MaterializeContext:
     assert ctx.gh is not None and ctx.outbox is not None
+    # A copied Planner draft is created under the key that the Planner API uses (the plan's content), so issues that
+    # the Planner already made are found again and never created twice.
+    if stored.meta.get(META_ADOPTED_FROM):
+        run_key = plan_run_key(stored.proposal)
+    else:
+        run_key = _run_key(ctx.run.id, stored.plan_sha)
     return MaterializeContext(
         repo=ctx.run.repo,
         gh=ctx.gh,
         outbox=ctx.outbox,
         store=ctx.store,
         control_issue=control_issue,
-        run_key=_run_key(ctx.run.id, plan_sha),
+        run_key=run_key,
         agents=sorted(_agents(ctx)),
         playbooks=playbooks,
         max_issues=node.max_issues,

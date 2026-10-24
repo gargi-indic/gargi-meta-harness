@@ -49,6 +49,9 @@ from harness.store.repo import (
 )
 
 LEDGER_KEY = "proposal"
+# The Planner API's run ids are ``<repo>#planner-<token>``; its drafts that passed validation have these statuses.
+PLANNER_RUN_INFIX = "#planner-"
+DRAFT_STATUSES = ("ready", "creating", "created")
 ENVELOPE_VERSION = 1
 # GitHub rejects comments of more than 65,536 characters; stay well below.
 MAX_COMMENT_CHARS = 60_000
@@ -364,6 +367,27 @@ async def get_proposal(
     stored = found[-1]
     _mirror(store, stored)
     return stored
+
+
+async def find_planner_draft(
+    gh: GitHub, *, repo: str, control_issue: int, plan_sha: str
+) -> StoredProposal | None:
+    """The draft that the Planner API keeps for ``plan_sha``, from any of its runs, read from GitHub.
+
+    The Planner API stores a draft under its own run id (``<repo>#planner-<token>``) in this same store. A draft
+    that passed validation (``ready``, or already being / done being created) is what the user chose to build;
+    a placeholder or invalid one is not. When there are several, the most edited one wins (``rev``), then the
+    newest. None when there is none.
+    """
+    prefix = f"{repo}{PLANNER_RUN_INFIX}"
+    found = [
+        s
+        for s in read_proposals(await gh.comments(repo, control_issue))
+        if s.run_id.startswith(prefix) and s.plan_sha == plan_sha and s.status in DRAFT_STATUSES
+    ]
+    if not found:
+        return None
+    return max(enumerate(found), key=lambda item: (item[1].rev, item[0]))[1]
 
 
 async def update_proposal(
