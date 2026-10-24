@@ -52,6 +52,10 @@ export type Rubric = string[] | null;
 export type Title7 = string | null;
 export type MaxVisits7 = number | null;
 export type Kind7 = "decompose";
+export type Plan = string | null;
+export type Guidance = string | null;
+export type Create = boolean;
+export type MaxIssues = number;
 export type Title8 = string | null;
 export type MaxVisits8 = number | null;
 export type Kind8 = "merge";
@@ -164,10 +168,23 @@ export interface JoinNode {
   inputs?: Inputs1;
   rubric?: Rubric;
 }
+/**
+ * Turn a plan document into a proposal of an epic with sub-issues (``harness.llm.decomposer``).
+ *
+ * ``plan`` is the plan source, a template: a repo file path (``docs/PLAN.md``) or an issue number (``12`` or
+ * ``#12``). Left out, the run inputs ``plan_path`` / ``plan_issue`` (and ``plan_ref``) name it, as for the plan gate.
+ * ``guidance`` is an optional template with extra instructions for the decomposer. The proposal is stored on
+ * GitHub and in the step output. With ``create: true`` the node also creates the issues, so it needs a ``plan``
+ * gate upstream (the validator checks); ``max_issues`` is the size limit of the proposal.
+ */
 export interface DecomposeNode {
   title?: Title7;
   max_visits?: MaxVisits7;
   kind?: Kind7;
+  plan?: Plan;
+  guidance?: Guidance;
+  create?: Create;
+  max_issues?: MaxIssues;
 }
 export interface MergeNode {
   title?: Title8;

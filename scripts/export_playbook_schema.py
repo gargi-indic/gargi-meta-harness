@@ -62,6 +62,7 @@ def build_ports_cases():
 
     # decompose
     add(DecomposeNode())
+    add(DecomposeNode(plan="docs/PLAN.md", create=True, max_visits=2))
 
     # merge
     add(MergeNode())

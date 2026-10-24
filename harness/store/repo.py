@@ -471,3 +471,92 @@ def events_since(store: Store, after_id: int, limit: int = 500) -> list[dict[str
         r["data"] = _parse_json_col(r["data_json"])
         del r["data_json"]
     return rows
+
+
+class ProposalRow(BaseModel, extra="forbid"):
+    """One row of the ``proposals`` mirror: the proposal JSON of a run for one plan sha, and its status."""
+
+    id: int
+    run_id: str
+    plan_sha: str
+    json_text: str
+    status: str
+    created_at: str
+
+
+def _proposal_row(r: dict[str, Any]) -> ProposalRow:
+    return ProposalRow(
+        id=r["id"],
+        run_id=r["run_id"],
+        plan_sha=r["plan_sha"],
+        json_text=r["json"],
+        status=r["status"],
+        created_at=r["created_at"],
+    )
+
+
+def save_proposal_row(
+    store: Store, *, run_id: str, plan_sha: str, json_text: str, status: str, created_at: str
+) -> ProposalRow:
+    """Insert or replace the mirror row of ``(run_id, plan_sha)``; ``created_at`` of an existing row is kept."""
+    with store.tx():
+        store.execute(
+            """
+            INSERT INTO proposals (run_id, plan_sha, json, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, plan_sha) DO UPDATE SET json = excluded.json, status = excluded.status
+            """,
+            (run_id, plan_sha, json_text, status, created_at),
+        )
+        row = get_proposal_row(store, run_id, plan_sha)
+    assert row is not None
+    return row
+
+
+def get_proposal_row(store: Store, run_id: str, plan_sha: str | None = None) -> ProposalRow | None:
+    """The mirror row of ``(run_id, plan_sha)``; without ``plan_sha`` the newest row of the run."""
+    if plan_sha is None:
+        rows = store.query("SELECT * FROM proposals WHERE run_id = ? ORDER BY id DESC LIMIT 1", (run_id,))
+    else:
+        rows = store.query("SELECT * FROM proposals WHERE run_id = ? AND plan_sha = ?", (run_id, plan_sha))
+    return _proposal_row(rows[0]) if rows else None
+
+
+def update_proposal_row(
+    store: Store,
+    run_id: str,
+    plan_sha: str,
+    *,
+    json_text: str | None = None,
+    status: str | None = None,
+) -> None:
+    sets, params = [], []
+    if json_text is not None:
+        sets.append("json = ?")
+        params.append(json_text)
+    if status is not None:
+        sets.append("status = ?")
+        params.append(status)
+    if not sets:
+        return
+    params.extend([run_id, plan_sha])
+    with store.tx():
+        cursor = store.execute(
+            f"UPDATE proposals SET {', '.join(sets)} WHERE run_id = ? AND plan_sha = ?", tuple(params)
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"no proposal for run {run_id} and plan {plan_sha}")
+
+
+def list_proposal_rows(store: Store, run_id: str | None = None) -> list[ProposalRow]:
+    if run_id is None:
+        rows = store.query("SELECT * FROM proposals ORDER BY id")
+    else:
+        rows = store.query("SELECT * FROM proposals WHERE run_id = ? ORDER BY id", (run_id,))
+    return [_proposal_row(r) for r in rows]
+
+
+def delete_proposal_rows_of_repo(store: Store, repo: str) -> None:
+    """Drop the mirror rows of the runs of ``repo`` (run ids start with ``<repo>#``)."""
+    prefix = f"{repo}#"
+    store.execute("DELETE FROM proposals WHERE substr(run_id, 1, ?) = ?", (len(prefix), prefix))

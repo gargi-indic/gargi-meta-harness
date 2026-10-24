@@ -230,11 +230,34 @@
     "node": {
       "title": null,
       "max_visits": null,
-      "kind": "decompose"
+      "kind": "decompose",
+      "plan": null,
+      "guidance": null,
+      "create": false,
+      "max_issues": 40
     },
     "ports": [
-      "created",
+      "proposed",
+      "invalid",
       "failed"
+    ]
+  },
+  {
+    "node": {
+      "title": null,
+      "max_visits": 2,
+      "kind": "decompose",
+      "plan": "docs/PLAN.md",
+      "guidance": null,
+      "create": true,
+      "max_issues": 40
+    },
+    "ports": [
+      "proposed",
+      "created",
+      "invalid",
+      "failed",
+      "exhausted"
     ]
   },
   {

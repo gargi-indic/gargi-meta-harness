@@ -554,7 +554,8 @@ def test_an_invalid_repo_playbook_is_one_error_line(h: Harness) -> None:
     code, out = h.invoke("run", REPO, str(ISSUE), "--playbook", "empty")
     assert code == 1 and "playbook empty has no nodes" in out
     code, out = h.invoke("run", REPO, str(ISSUE), "--playbook", "decomposing")
-    assert code == 1 and "without an executor: decompose" in out
+    # decompose has an executor now; the old two-port wiring (created/failed) no longer fits its ports
+    assert code == 1 and "playbook decomposing is invalid" in out and "unrouted_port" in out
     code, out = h.invoke("run", REPO, str(ISSUE), "--playbook", "../etc/passwd")
     assert code == 1 and "invalid playbook id" in out
 

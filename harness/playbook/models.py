@@ -145,10 +145,28 @@ class JoinNode(NodeBase):
 
 
 class DecomposeNode(NodeBase):
+    """Turn a plan document into a proposal of an epic with sub-issues (``harness.llm.decomposer``).
+
+    ``plan`` is the plan source, a template: a repo file path (``docs/PLAN.md``) or an issue number (``12`` or
+    ``#12``). Left out, the run inputs ``plan_path`` / ``plan_issue`` (and ``plan_ref``) name it, as for the plan gate.
+    ``guidance`` is an optional template with extra instructions for the decomposer. The proposal is stored on
+    GitHub and in the step output. With ``create: true`` the node also creates the issues, so it needs a ``plan``
+    gate upstream (the validator checks); ``max_issues`` is the size limit of the proposal.
+    """
+
     kind: Literal["decompose"] = "decompose"
+    plan: str | None = None
+    guidance: str | None = None
+    create: bool = False
+    # Equal to harness.planner.proposal.DEFAULT_MAX_ISSUES (a test pins it; that module imports this one).
+    max_issues: int = Field(default=40, ge=1)
 
     def ports(self) -> tuple[str, ...]:
-        return self._add_exhausted(("created", "failed"))
+        # ``created`` only exists when the node creates the issues.
+        ports = (
+            ("proposed", "created", "invalid", "failed") if self.create else ("proposed", "invalid", "failed")
+        )
+        return self._add_exhausted(ports)
 
 
 class MergeNode(NodeBase):

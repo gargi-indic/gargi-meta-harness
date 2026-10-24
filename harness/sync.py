@@ -8,6 +8,8 @@ from harness.github.client import GitHub, GitHubError
 from harness.github.labels import HARNESS_LABEL_PREFIX
 from harness.github.ledger import LedgerCorrupt, find_ledger, parse_ledger
 from harness.github.outbox import ledger_mirror_key
+from harness.planner.proposal_store import LEDGER_KEY as PROPOSAL_LEDGER_KEY
+from harness.planner.proposal_store import restore_proposal_mirror
 from harness.store.db import Store
 from harness.store.repo import IssueRow, get_repo, set_meta, upsert_issue, upsert_repo
 
@@ -33,7 +35,7 @@ async def _restore_plan_mirror(
     ledgers: dict[int, dict],
     errors: list[str],
 ) -> None:
-    """GitHub is the state store: rebuild the local mirror of the plan approval from the control ledger."""
+    """GitHub is the state store: rebuild the local mirrors of the plan approval, the proposal summary and the proposals."""
     snapshot: dict[str, Any] | None = ledgers.get(control_issue)
     if snapshot is None:
         try:
@@ -45,9 +47,14 @@ async def _restore_plan_mirror(
         except GitHubError as e:
             errors.append(f"Control issue {control_issue} ledger not read: {e}")
             return
-    record = (snapshot or {}).get(PLAN_LEDGER_KEY)
-    value = json.dumps(record, sort_keys=True) if isinstance(record, dict) else ""
-    set_meta(store, ledger_mirror_key(repo, control_issue, PLAN_LEDGER_KEY), value)
+    for key in (PLAN_LEDGER_KEY, PROPOSAL_LEDGER_KEY):
+        record = (snapshot or {}).get(key)
+        value = json.dumps(record, sort_keys=True) if isinstance(record, dict) else ""
+        set_meta(store, ledger_mirror_key(repo, control_issue, key), value)
+    try:
+        await restore_proposal_mirror(gh, store, repo, control_issue)
+    except GitHubError as e:
+        errors.append(f"Control issue {control_issue} proposals not read: {e}")
 
 
 async def sync_repo(gh: GitHub, store: Store, repo: str, *, full: bool = False) -> SyncReport:

@@ -129,6 +129,20 @@ MIGRATIONS: list[list[str]] = [
         """,
         "CREATE INDEX idx_control_requests_pending ON control_requests (handled_at, id)",
     ],
+    [
+        # A mirror of the proposal comments on the control issue (GitHub is the store; `harness sync` refills it).
+        """
+        CREATE TABLE proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            plan_sha TEXT NOT NULL,
+            json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, plan_sha)
+        )
+        """,
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 
