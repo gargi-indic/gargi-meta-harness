@@ -34,3 +34,12 @@
   (`default_registry(review_backend=...)` sets it); without one, a select join with 2+ candidates fails the step.
 - `harness/playbooks/tournament.yaml` uses this: `fork` -> `a`/`b` -> `pick` (select). A node after the join continues the winner's session with `session: "{{ pick.winner }}"` (the agent executor renders `session` as a template).
 - The run is done only when routing reaches `@done`; a run cancel (`Runner.cancel`) cancels every waiting session.
+
+## Plan gate (campaign scope)
+
+- A `gate` node with `scope: campaign` (only allowed on the gate named `plan`) waits for the approval of the campaign's plan document instead of a per-issue decision. There is no `gates` row; the step stays `waiting` with `needs_you` (inbox kind `plan_approval`) until the plan is approved. `gates.plan: auto` still approves at once.
+- The plan is a repo file or an issue: the run inputs `plan_path` or `plan_issue` (and optionally `plan_ref`) name it. `PlanDoc.sha` is the git blob sha for a file and `sha256(title + "\n" + body)` for an issue.
+- GitHub is the state store. The approval is a `plan` record in the control issue's ledger (`plan_sha`, `approved_by`, `via`, ...; never the plan text). It is written through the outbox (`merge_ledger`, which keeps the lock and every other ledger key) and mirrored into the local store only after GitHub has it; `harness sync` rebuilds the mirror from the ledger.
+- Signals (owner or `command_users` only): the label `harness:plan-approved` on the control issue (added after the plan's last change), the merge of the PR that last modified the plan file, or `harness plan approve`. The executor turns a fresh signal into the ledger record and resolves `approved` on the next poll.
+- If the plan's sha differs from the approved `plan_sha` the status is `STALE`: the gate asks again (one request comment per sha, label `harness:needs-you`) and nothing already created is cancelled. A label event is used up by the record it produced, so approving a changed plan needs a new label event (remove and re-add the label) or a merged PR for the new text.
+- The inbox cannot approve a campaign plan item: it answers 422 and points to the label or the CLI.

@@ -152,7 +152,8 @@
       "title": null,
       "max_visits": null,
       "kind": "gate",
-      "gate": "test"
+      "gate": "test",
+      "scope": "issue"
     },
     "ports": [
       "approved",

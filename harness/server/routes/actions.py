@@ -175,6 +175,13 @@ async def approve_item(
     gate_id = _gate_id(step)
     if gate_id:
         return _decide(store, gate_id, "approved", body.note or None)
+    if (step.output or {}).get("plan_sha"):
+        # A campaign plan gate: resuming at an earlier node would skip it, and the approval is a GitHub signal.
+        raise HTTPException(
+            status_code=422,
+            detail="the campaign plan is approved on GitHub: add the harness:plan-approved label "
+            "to the control issue or run `harness plan approve`",
+        )
     to = body.to or _default_resume_node(store, step)
     if not to:
         raise HTTPException(status_code=422, detail="no node to resume at")

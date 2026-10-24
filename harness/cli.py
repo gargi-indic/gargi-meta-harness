@@ -21,9 +21,19 @@ from harness.dag import blocked, ready_set
 from harness.engine import RunExists, Runner
 from harness.engine.model import TERMINAL_STATUSES
 from harness.github.client import GitHub, GitHubError
-from harness.github.commands import decide, default_retry_node, resolve_gate
+from harness.github.commands import allowed_logins, decide, default_retry_node, resolve_gate
 from harness.github.labels import ensure_harness_labels
+from harness.github.outbox import Outbox, ledger_mirror_key
 from harness.lock import LockHeld
+from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
+from harness.planner.plan_gate import (
+    APPROVED_LABEL,
+    PLAN_KEY,
+    PlanApprovalStatus,
+    check_plan_approval,
+    label_cursor,
+    record_plan_approval,
+)
 from harness.playbook.load import PlaybookError, builtin_playbooks, load_playbook
 from harness.playbook.models import Playbook
 from harness.playbook.validate import validate
@@ -37,6 +47,7 @@ from harness.store.repo import (
     events_since,
     get_gate,
     get_issue,
+    get_meta,
     get_repo,
     get_run,
     list_issues,
@@ -769,6 +780,150 @@ def playbook_list() -> None:
 
 
 # ---- web UI ----------------------------------------------------------------------------------------------
+
+
+# ---- plan gate -------------------------------------------------------------------------------------------
+
+plan_app = typer.Typer(help="Campaign plan commands")
+app.add_typer(plan_app, name="plan")
+
+
+def _plan_target(
+    store: Store, repo: str | None, control_issue: int | None
+) -> tuple[str, int | None, list[str]]:
+    """The repo, its control issue and the plan allowlist, from the options and the last synced config."""
+    target = _single_repo(repo)
+    if not target:
+        raise _fail("give --repo owner/name")
+    stored = get_repo(store, target)
+    try:
+        config = RepoConfig.model_validate((stored or {}).get("config") or {})
+    except ValueError:
+        config = RepoConfig()
+    return target, control_issue if control_issue is not None else config.control_issue, config.command_users
+
+
+async def _with_github(gh: GitHub, action: Callable[[], Awaitable[None]]) -> None:
+    try:
+        await action()
+    finally:
+        await gh.aclose()
+
+
+def _plan_source(path: str | None, issue: int | None) -> None:
+    if (path is None) == (issue is None):
+        raise _fail("give exactly one of --path or --issue as the plan source")
+
+
+def _describe_approval(approval: Any) -> str:
+    text = approval.status.value.upper()
+    if approval.status is PlanApprovalStatus.APPROVED:
+        text += f" by @{approval.approved_by} via {approval.via} (sha {str(approval.approved_sha)[:12]})"
+    elif approval.status is PlanApprovalStatus.STALE:
+        text += f": approved sha {str(approval.approved_sha)[:12]}, the plan has changed since"
+    if approval.note:
+        text += f" ({approval.note})"
+    return text
+
+
+@plan_app.command("show")
+def plan_show(
+    repo: str = typer.Option(None, "--repo"),
+    path: str = typer.Option(None, "--path", help="Plan file in the repo, for example docs/PLAN.md."),
+    issue: int = typer.Option(None, "--issue", help="Plan issue number (instead of --path)."),
+    ref: str = typer.Option(None, "--ref", help="Branch or commit of the plan file (default branch)."),
+    control_issue: int = typer.Option(None, "--control-issue"),
+) -> None:
+    """Show the plan document and whether it is approved."""
+    _plan_source(path, issue)
+    store = _open_store()
+    gh = _make_github()
+
+    async def _show() -> None:
+        target, control, allowlist = _plan_target(store, repo, control_issue)
+        plan = await load_plan_doc(gh, target, path=path, issue=issue, ref=ref)
+        print(f"plan:     {plan.source}" + (f" @ {plan.ref}" if plan.ref else ""))
+        print(f"title:    {plan.title}")
+        print(f"sha:      {plan.sha}")
+        print(f"headings: {len(plan.headings)}")
+        for heading in plan.headings:
+            print(f"  - {heading}")
+        if control is None:
+            print("approval: unknown (no control issue: pass --control-issue)")
+            return
+        approval = await check_plan_approval(
+            gh, repo=target, control_issue=control, plan=plan, owner_allowlist=allowlist, store=store
+        )
+        print(f"approval: {_describe_approval(approval)}")
+
+    try:
+        asyncio.run(_with_github(gh, _show))
+    except (PlanDocError, GitHubError, ValueError) as exc:
+        raise _fail(f"error: {redact(_error_message(exc))}") from None
+    finally:
+        store.close()
+
+
+async def _approve_plan(
+    gh: GitHub, store: Store, target: str, control: int, allowlist: list[str], plan: PlanDoc
+) -> None:
+    actor = str((await gh.get("user")).get("login") or "")
+    allowed = allowed_logins(target, allowlist) | {target.split("/")[0].lower()}
+    if actor.lower() not in allowed:
+        raise _fail(
+            f"@{actor or '?'} is not allowed to approve plans for {target}: "
+            f"only the repo owner or command_users ({', '.join(sorted(allowed))})"
+        )
+    approval = await check_plan_approval(
+        gh, repo=target, control_issue=control, plan=plan, owner_allowlist=allowlist, store=store
+    )
+    if approval.status is PlanApprovalStatus.APPROVED and not approval.fresh:
+        print(f"already approved: {_describe_approval(approval)}")
+        return
+    outbox = Outbox(store, gh)
+    outbox.enqueue(
+        "set_labels",
+        {"repo": target, "issue": control, "add": [APPROVED_LABEL], "remove": []},
+        coalesce_key=f"plan-label:{target}#{control}",
+    )
+    await outbox.drain_once()
+    cursor = await label_cursor(gh, target, control)
+    record_plan_approval(
+        store, outbox, repo=target, control_issue=control, plan=plan, by=actor, via="cli", label_cursor=cursor
+    )
+    await outbox.drain_once()
+    if get_meta(store, ledger_mirror_key(target, control, PLAN_KEY)):
+        print(f"approved {plan.source} (sha {plan.sha[:12]}) as @{actor}")
+    else:
+        print(f"approval of {plan.source} queued as @{actor}; it is not on GitHub yet (the daemon retries)")
+
+
+@plan_app.command("approve")
+def plan_approve(
+    repo: str = typer.Option(None, "--repo"),
+    control_issue: int = typer.Option(None, "--control-issue"),
+    path: str = typer.Option(None, "--path", help="Plan file in the repo, for example docs/PLAN.md."),
+    issue: int = typer.Option(None, "--issue", help="Plan issue number (instead of --path)."),
+    ref: str = typer.Option(None, "--ref", help="Branch or commit of the plan file (default branch)."),
+) -> None:
+    """Approve the current version of the plan: label the control issue and record the approval in its ledger."""
+    _plan_source(path, issue)
+    store = _open_store()
+    gh = _make_github()
+
+    async def _approve() -> None:
+        target, control, allowlist = _plan_target(store, repo, control_issue)
+        if control is None:
+            raise _fail("no control issue: pass --control-issue or set control_issue in .harness/config.yaml")
+        plan = await load_plan_doc(gh, target, path=path, issue=issue, ref=ref)
+        await _approve_plan(gh, store, target, control, allowlist, plan)
+
+    try:
+        asyncio.run(_with_github(gh, _approve))
+    except (PlanDocError, GitHubError, ValueError) as exc:
+        raise _fail(f"error: {redact(_error_message(exc))}") from None
+    finally:
+        store.close()
 
 
 def build_server_config(application: "FastAPI", port: int) -> "uvicorn.Config":

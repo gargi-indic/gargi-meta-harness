@@ -31,6 +31,7 @@ export type Title3 = string | null;
 export type MaxVisits3 = number | null;
 export type Kind3 = "gate";
 export type Gate = string;
+export type Scope = "issue" | "campaign";
 export type Title4 = string | null;
 export type MaxVisits4 = number | null;
 export type Kind4 = "branch";
@@ -136,6 +137,7 @@ export interface GateNode {
   max_visits?: MaxVisits3;
   kind?: Kind3;
   gate: Gate;
+  scope?: Scope;
 }
 export interface BranchNode {
   title?: Title4;

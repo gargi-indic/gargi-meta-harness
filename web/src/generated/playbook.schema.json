@@ -382,6 +382,15 @@
         "gate": {
           "title": "Gate",
           "type": "string"
+        },
+        "scope": {
+          "default": "issue",
+          "enum": [
+            "issue",
+            "campaign"
+          ],
+          "title": "Scope",
+          "type": "string"
         }
       },
       "required": [

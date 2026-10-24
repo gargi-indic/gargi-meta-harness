@@ -6,6 +6,7 @@ effects, so a restart never applies a command twice.
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -167,6 +168,11 @@ def default_retry_node(store: Store, run_id: str) -> str:
     raise ValueError(f"run {run_id} has no failed or escalated node to retry")
 
 
+def allowed_logins(repo: str, command_users: Iterable[str]) -> set[str]:
+    """Lower-cased logins that may command the harness: ``command_users``, or the repo owner when it is empty."""
+    return {u.lower() for u in command_users} or {repo.split("/")[0].lower()}
+
+
 # ---- polling comments ----------------------------------------------------------------------------------
 
 
@@ -289,7 +295,7 @@ async def poll_commands(
     outbox: Outbox,
 ) -> int:
     """Apply new ``/harness`` comments on the repo's active runs. Returns the number of commands applied."""
-    allowed = {u.lower() for u in repo_config.command_users} or {repo.split("/")[0].lower()}
+    allowed = allowed_logins(repo, repo_config.command_users)
     runs: dict[int, RunRow] = {}
     for candidate in list_runs(store):  # newest first: keep one run per issue
         if candidate.repo == repo and candidate.status in ACTIVE_RUN_STATUSES:

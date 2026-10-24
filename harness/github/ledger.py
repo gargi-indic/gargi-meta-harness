@@ -115,6 +115,17 @@ def parse_ledger(comment_body: str) -> dict[str, Any] | None:
     return _decode_payload(comment_body[payload_start:end])
 
 
+def ledger_summary(comment_body: str) -> str:
+    """The human-readable part of a ledger comment: what lies between the marker and the state block."""
+    if not is_ledger(comment_body):
+        return ""
+    text = comment_body.lstrip()[len(LEDGER_MARKER) :]
+    start = text.rfind(_STATE_PREFIX)
+    if start != -1:
+        text = text[:start]
+    return text.strip()
+
+
 def find_ledger(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Return the oldest ledger comment (by ``created_at``, then ``id``), or None."""
     ledgers = [c for c in comments if is_ledger(c.get("body") or "")]
