@@ -83,6 +83,14 @@ def validate(pb: Playbook, *, agent_caps: dict[str, set[str]] | None = None) -> 
         # Additional node-specific checks
         if node.kind == "gate" and node.gate not in pb.gates:
             issues.append(PlaybookIssue(f"nodes.{node_id}.gate", "unknown_gate", f"Unknown gate {node.gate}"))
+        if node.kind == "gate" and node.scope == "campaign" and node.gate != "plan":
+            issues.append(
+                PlaybookIssue(
+                    f"nodes.{node_id}.scope",
+                    "campaign_scope",
+                    "scope 'campaign' is only supported on the gate named 'plan'",
+                )
+            )
 
         if node.kind == "agent":
             if node.action == "revise" and not node.message:

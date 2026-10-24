@@ -12,15 +12,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from harness.github.client import GitHub
 from harness.github.control_table import ControlRow, upsert_row
 from harness.github.labels import ensure_harness_labels
-from harness.github.ledger import find_ledger
+from harness.github.ledger import find_ledger, ledger_summary, parse_ledger, render_ledger
 from harness.secrets import redact
 from harness.store.db import Store
-from harness.store.repo import append_event
+from harness.store.repo import append_event, set_meta
 
 OpType = Literal[
     "add_comment",
     "edit_comment",
     "upsert_ledger",
+    "merge_ledger",
     "edit_issue_body",
     "set_labels",
     "merge_pull",
@@ -49,6 +50,12 @@ class EditCommentPayload(OutboxPayload):
 class UpsertLedgerPayload(OutboxPayload):
     issue: int
     body: str
+
+
+class MergeLedgerPayload(OutboxPayload):
+    issue: int
+    key: str
+    value: dict[str, Any] | None
 
 
 class EditIssueBodyPayload(OutboxPayload):
@@ -87,6 +94,14 @@ class TickBoxesPayload(OutboxPayload):
     issue: int
 
 
+MERGED_LEDGER_SUMMARY = "Harness control ledger."
+
+
+def ledger_mirror_key(repo: str, issue: int, key: str) -> str:
+    """The ``meta`` row that mirrors one top-level key of ``issue``'s ledger snapshot (JSON, or absent)."""
+    return f"ledger:{repo}#{issue}:{key}"
+
+
 _UNCHECKED_BOX = re.compile(r"(?m)^(\s*[-*+] )\[ \]")
 
 
@@ -99,6 +114,7 @@ _PAYLOAD_MODELS: dict[OpType, type[BaseModel]] = {
     "add_comment": AddCommentPayload,
     "edit_comment": EditCommentPayload,
     "upsert_ledger": UpsertLedgerPayload,
+    "merge_ledger": MergeLedgerPayload,
     "edit_issue_body": EditIssueBodyPayload,
     "set_labels": SetLabelsPayload,
     "merge_pull": MergePullPayload,
@@ -284,6 +300,8 @@ class Outbox:
                 comment_id = resp["id"]
             if self.on_ledger_comment is not None:
                 await self.on_ledger_comment(repo, issue, comment_id)
+        elif op == "merge_ledger":
+            await self._merge_ledger(repo, payload["issue"], payload["key"], payload["value"])
         elif op == "edit_issue_body":
             issue = payload["issue"]
             row_dict = payload["row"]
@@ -322,6 +340,29 @@ class Outbox:
             new_body = tick_boxes(current_body)
             if new_body != current_body:
                 await self.gh.update_issue(repo, issue, body=new_body)
+
+    async def _merge_ledger(self, repo: str, issue: int, key: str, value: dict[str, Any] | None) -> None:
+        """Set (or, for None, drop) one top-level key of the issue's ledger snapshot, keeping every other key.
+
+        The snapshot is read when the op is sent, not when it was queued, so a lock or a run snapshot written in
+        between is preserved. The local mirror of the key is written only after GitHub has the new ledger.
+        """
+        ledger = find_ledger(await self.gh.comments(repo, issue))
+        snapshot = (parse_ledger(ledger.get("body") or "") if ledger else None) or {}
+        if value is None:
+            snapshot.pop(key, None)
+        else:
+            snapshot[key] = value
+        summary = (ledger_summary(ledger.get("body") or "") if ledger else "") or MERGED_LEDGER_SUMMARY
+        body = render_ledger(snapshot, summary)
+        if ledger is not None:
+            comment_id = ledger["id"]
+            await self.gh.edit_comment(repo, comment_id, body)
+        else:
+            comment_id = (await self.gh.add_comment(repo, issue, body))["id"]
+        set_meta(self.store, ledger_mirror_key(repo, issue, key), json.dumps(value, sort_keys=True))
+        if self.on_ledger_comment is not None:
+            await self.on_ledger_comment(repo, issue, comment_id)
 
     async def run(self, stop: asyncio.Event, idle_sleep: float = 2.0) -> None:
         while not stop.is_set():

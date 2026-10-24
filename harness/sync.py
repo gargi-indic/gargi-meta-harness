@@ -1,11 +1,17 @@
+import json
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict
 
 from harness.config import RepoConfig, parse_repo_config
-from harness.github.client import GitHub
+from harness.github.client import GitHub, GitHubError
 from harness.github.labels import HARNESS_LABEL_PREFIX
 from harness.github.ledger import LedgerCorrupt, find_ledger, parse_ledger
+from harness.github.outbox import ledger_mirror_key
 from harness.store.db import Store
-from harness.store.repo import IssueRow, get_repo, upsert_issue, upsert_repo
+from harness.store.repo import IssueRow, get_repo, set_meta, upsert_issue, upsert_repo
+
+PLAN_LEDGER_KEY = "plan"
 
 
 class SyncReport(BaseModel):
@@ -17,6 +23,31 @@ class SyncReport(BaseModel):
     full: bool
     ledgers: dict[int, dict]
     errors: list[str]
+
+
+async def _restore_plan_mirror(
+    gh: GitHub,
+    store: Store,
+    repo: str,
+    control_issue: int,
+    ledgers: dict[int, dict],
+    errors: list[str],
+) -> None:
+    """GitHub is the state store: rebuild the local mirror of the plan approval from the control ledger."""
+    snapshot: dict[str, Any] | None = ledgers.get(control_issue)
+    if snapshot is None:
+        try:
+            comment = find_ledger(await gh.comments(repo, control_issue))
+            snapshot = parse_ledger(comment.get("body") or "") if comment else None
+        except LedgerCorrupt as e:
+            errors.append(f"Issue {control_issue} ledger corrupt: {e}")
+            return
+        except GitHubError as e:
+            errors.append(f"Control issue {control_issue} ledger not read: {e}")
+            return
+    record = (snapshot or {}).get(PLAN_LEDGER_KEY)
+    value = json.dumps(record, sort_keys=True) if isinstance(record, dict) else ""
+    set_meta(store, ledger_mirror_key(repo, control_issue, PLAN_LEDGER_KEY), value)
 
 
 async def sync_repo(gh: GitHub, store: Store, repo: str, *, full: bool = False) -> SyncReport:
@@ -87,6 +118,9 @@ async def sync_repo(gh: GitHub, store: Store, repo: str, *, full: bool = False) 
                         ledgers[number] = snapshot
                 except LedgerCorrupt as e:
                     errors.append(f"Issue {number} ledger corrupt: {e}")
+
+    if config.control_issue is not None:
+        await _restore_plan_mirror(gh, store, repo, config.control_issue, ledgers, errors)
 
     upsert_repo(
         store,

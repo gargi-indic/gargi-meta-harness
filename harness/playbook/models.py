@@ -100,6 +100,8 @@ class CheckNode(NodeBase):
 class GateNode(NodeBase):
     kind: Literal["gate"] = "gate"
     gate: str
+    # ``campaign``: the gate waits for the campaign's plan approval (gate name ``plan``), not a per-issue decision.
+    scope: Literal["issue", "campaign"] = "issue"
 
     def ports(self) -> tuple[str, ...]:
         return self._add_exhausted(("approved", "rejected"))
