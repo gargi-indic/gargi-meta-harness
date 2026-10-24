@@ -8,9 +8,15 @@ version; everything version-sensitive is read with ``getattr``.
 
 import json
 import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Protocol
 
+from harness.adapters.base import Usage
+from harness.ops.pricing import PricingTable
+from harness.ops.sdk_usage import usage_from_result
 from harness.secrets import redact
 
 READ_ONLY_TOOLS = [
@@ -28,6 +34,28 @@ DISALLOWED_TOOLS = ["Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"]
 _FENCE_RE = re.compile(r"^\s*```[A-Za-z0-9_-]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
 
+# Where a backend reports what one ``review`` call cost. ``review`` returns a plain dict, so the spend travels
+# on this side channel: a caller that has a run context wraps its call in ``usage_sink(callback)``; backends
+# call ``emit_usage`` and nothing happens when no sink is set. A ContextVar is per task, so concurrent runs
+# sharing one backend never see each other's sink.
+_SINK: ContextVar[Callable[[Usage], None] | None] = ContextVar("review_usage_sink", default=None)
+
+
+@contextmanager
+def usage_sink(on_usage: Callable[[Usage], None] | None) -> Iterator[None]:
+    token = _SINK.set(on_usage)
+    try:
+        yield
+    finally:
+        _SINK.reset(token)
+
+
+def emit_usage(usage: Usage | None) -> None:
+    sink = _SINK.get()
+    if usage is not None and sink is not None:
+        sink(usage)
+
+
 class ReviewBackend(Protocol):
     async def review(self, system: str, prompt: str, schema: dict, workdir: Path | None) -> dict: ...
 
@@ -39,8 +67,12 @@ class BackendError(RuntimeError):
 class FakeBackend:
     """Returns scripted responses in order. A ``str`` stands for raw text, an Exception is raised."""
 
-    def __init__(self, responses: list[dict | str | Exception]) -> None:
+    def __init__(
+        self, responses: list[dict | str | Exception], usage: list[Usage | None] | None = None
+    ) -> None:
         self._responses = list(responses)
+        # Scripted spend, one entry per call (None or exhausted: the call reports nothing).
+        self._usage = list(usage or [])
         self.calls: list[dict[str, Any]] = []
 
     async def review(self, system: str, prompt: str, schema: dict, workdir: Path | None) -> dict:
@@ -48,13 +80,17 @@ class FakeBackend:
         if not self._responses:
             raise BackendError("FakeBackend has no scripted response left")
         item = self._responses.pop(0)
+        emit_usage(self._usage.pop(0) if self._usage else None)
         if isinstance(item, Exception):
             raise item
         return item  # type: ignore[return-value]  # a str is parsed by the caller
 
 
 class ClaudeSdkBackend:
-    def __init__(self, *, model: str | None = None, max_turns: int = 30) -> None:
+    def __init__(
+        self, *, model: str | None = None, max_turns: int = 30, pricing: PricingTable | None = None
+    ) -> None:
+        self.pricing = pricing
         self.model = model
         self.max_turns = max_turns
 
@@ -96,6 +132,9 @@ class ClaudeSdkBackend:
 
         if final is None:
             raise BackendError("claude-agent-sdk returned no result message")
+        emit_usage(
+            usage_from_result(final, default_model=self.model, table=self.pricing)
+        )  # a failed call cost money too
         if getattr(final, "is_error", False):
             detail = getattr(final, "result", None) or getattr(final, "subtype", None) or "unknown error"
             raise BackendError(redact(f"claude-agent-sdk reported an error: {detail}")[:500])

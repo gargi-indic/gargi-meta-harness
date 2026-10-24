@@ -59,6 +59,10 @@ class ResultMessage:
     result: str | None = None
     session_id: str | None = None
     errors: list[str] = field(default_factory=list)
+    # What the real SDK reports on a result (all optional, like there).
+    total_cost_usd: float | None = None
+    usage: dict[str, Any] | None = None
+    model_usage: dict[str, Any] | None = None
 
 
 Step = Any  # a message, or a callable run in place (sync or async)
@@ -607,3 +611,46 @@ async def test_claude_honours_repo_config(tmp_path, monkeypatch):
                 assert adapter.caps.max_concurrency == 4 and adapter.config.model == "m1"
         finally:
             await app.aclose()
+
+
+async def test_poll_passes_the_sdk_cost_and_tokens_through(git_env, respx_mock):
+    _, _, wt, _ = git_env
+    result = ResultMessage(
+        total_cost_usd=0.5,
+        usage={"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 20},
+        model_usage={"claude-sonnet-x": {"costUSD": 0.5}},
+    )
+    pulls_route(respx_mock).respond(json=[])
+    create_route(respx_mock)
+    adapter = make_adapter(git_env, Factory([[write_file(wt, "file.txt", "change"), result]]))
+    ref = await adapter.start(make_req(wt, "cost-1"))
+    snapshot = await run_to_idle(adapter, ref)
+    assert snapshot.usage is not None
+    assert (snapshot.usage.cost_usd, snapshot.usage.estimated) == (0.5, False)
+    assert (snapshot.usage.input_tokens, snapshot.usage.output_tokens) == (150, 20)
+    assert snapshot.usage.model == "claude-sonnet-x"
+    assert (
+        await adapter.poll(ref)
+    ).usage == snapshot.usage  # cumulative: the same reading until the next turn
+
+
+async def test_poll_estimates_the_cost_when_the_sdk_reports_only_tokens(git_env, respx_mock):
+    _, _, wt, _ = git_env
+    result = ResultMessage(usage={"input_tokens": 1_000_000, "output_tokens": 0})
+    pulls_route(respx_mock).respond(json=[])
+    create_route(respx_mock)
+    config = ClaudeAgentConfig(model="some-new-model")
+    adapter = make_adapter(git_env, Factory([[write_file(wt, "file.txt", "c"), result]]), config=config)
+    ref = await adapter.start(make_req(wt, "cost-2"))
+    snapshot = await run_to_idle(adapter, ref)
+    assert snapshot.usage is not None and snapshot.usage.estimated is True
+    assert snapshot.usage.cost_usd > 0
+
+
+async def test_poll_without_sdk_cost_fields_reports_no_usage(git_env, respx_mock):
+    _, _, wt, _ = git_env
+    pulls_route(respx_mock).respond(json=[])
+    create_route(respx_mock)
+    adapter = make_adapter(git_env, Factory([[write_file(wt, "file.txt", "c"), ResultMessage()]]))
+    ref = await adapter.start(make_req(wt, "cost-3"))
+    assert (await run_to_idle(adapter, ref)).usage is None

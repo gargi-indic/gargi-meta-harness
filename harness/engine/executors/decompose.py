@@ -39,8 +39,9 @@ from harness.adapters.base import Capabilities
 from harness.engine.executors.base import Done, ExecContext, Waiting
 from harness.github.client import GitHub, GitHubError
 from harness.github.outbox import Outbox, OutboxOpFailed
-from harness.llm.backend import ReviewBackend
+from harness.llm.backend import ReviewBackend, usage_sink
 from harness.llm.decomposer import DecompositionError, decompose
+from harness.ops.costs import llm_usage_sink
 from harness.planner.context import RepoContext, build_repo_context
 from harness.planner.materialize import (
     MaterializeContext,
@@ -113,15 +114,17 @@ class DecomposeExecutor:
             if node.guidance is not None:
                 guidance = render(node.guidance, ctx.template, path="decompose.guidance").strip() or None
             try:
-                proposal = await decompose(
-                    backend=self.backend,
-                    plan_doc=plan_doc,
-                    repo_context=await _repo_context(gh, ctx, plan_doc),
-                    agents=_agents(ctx),
-                    playbooks=playbooks,
-                    guidance=guidance,
-                    max_issues=node.max_issues,
-                )
+                repo_context = await _repo_context(gh, ctx, plan_doc)
+                with usage_sink(llm_usage_sink(ctx.store, run_id, step.id, "decompose")):
+                    proposal = await decompose(
+                        backend=self.backend,
+                        plan_doc=plan_doc,
+                        repo_context=repo_context,
+                        agents=_agents(ctx),
+                        playbooks=playbooks,
+                        guidance=guidance,
+                        max_issues=node.max_issues,
+                    )
             except DecompositionError as exc:
                 return _refused(exc.issues, plan_doc, str(exc))
             stored = await save_proposal(

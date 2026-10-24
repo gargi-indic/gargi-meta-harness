@@ -77,6 +77,8 @@ class RunSnapshot(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     agent: str | None = None
     pr: dict[str, Any] | None = None
+    # What the run has spent (see harness.ops.costs); absent on ledgers written before cost tracking.
+    usage: dict[str, Any] | None = None
 
 
 def _is_truncation_marker(output: dict[str, Any]) -> bool:
@@ -138,8 +140,12 @@ def to_snapshot(store: Store, run_id: str, *, max_output_bytes: int = DEFAULT_OU
         inputs=dict(ctx.get("inputs", {})),
         agent=ctx.get("agent"),
         pr=ctx.get("pr"),
+        usage=ctx.get("usage") if isinstance(ctx.get("usage"), dict) else None,
     )
-    return snap.model_dump(mode="json")
+    dumped = snap.model_dump(mode="json")
+    if dumped["usage"] is None:
+        del dumped["usage"]  # keep ledgers of runs without cost data byte-identical to before
+    return dumped
 
 
 def rehydrate(store: Store, snapshot: dict[str, Any]) -> str:
@@ -160,6 +166,8 @@ def rehydrate(store: Store, snapshot: dict[str, Any]) -> str:
     }
     if snap.pr is not None:
         context["pr"] = snap.pr
+    if snap.usage is not None:
+        context["usage"] = snap.usage
     with store.tx():
         if get_run(store, r.id) is None:
             insert_run(

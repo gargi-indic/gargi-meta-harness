@@ -83,6 +83,17 @@ class ActivityItem(_Model):
     text: str
 
 
+class Usage(_Model):
+    """What a session or a model call has spent. Adapters that cannot tell report no ``Usage`` at all (``n/a``)."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float = 0.0
+    # True when the cost was computed from a price table instead of reported by the provider.
+    estimated: bool = False
+    model: str | None = None
+
+
 class AgentSnapshot(_Model):
     state: AgentState
     plan: str | None = None
@@ -93,6 +104,8 @@ class AgentSnapshot(_Model):
     error: str | None = None
     # Seconds the engine should wait before polling again.
     poll_after: float = 60.0
+    # Cumulative usage of the session so far; None when the adapter cannot report it.
+    usage: Usage | None = None
 
 
 @runtime_checkable

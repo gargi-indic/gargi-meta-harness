@@ -7,6 +7,7 @@ from harness.adapters.base import AgentSnapshot, AgentState, SessionRef, StartRe
 from harness.engine.brief import build_brief
 from harness.engine.executors.base import Done, ExecContext, Executor, Waiting
 from harness.github.client import GitHubError
+from harness.ops.costs import record_cumulative
 from harness.playbook.models import AgentNode, Node
 from harness.playbook.templating import render
 from harness.secrets import redact
@@ -123,6 +124,17 @@ class AgentExecutor(Executor):
 
         async def poll(current: SessionRef) -> AgentSnapshot:
             snapshot = await adapter.poll(current)
+            if snapshot.usage is not None:
+                # Idempotent: the last cumulative reading per session is kept in the run's usage record.
+                record_cumulative(
+                    ctx.store,
+                    ctx.run.id,
+                    step.id,
+                    source="agent",
+                    adapter=agent_name,
+                    session_id=current.id,
+                    usage=snapshot.usage,
+                )
             if snapshot.activity:
                 with ctx.store.tx():
                     for item in snapshot.activity:

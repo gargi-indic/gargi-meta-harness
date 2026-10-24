@@ -6,6 +6,7 @@ EXPECTED_PATHS = [
     "/api/campaigns",
     "/api/campaigns/{owner}/{repo}/graph",
     "/api/control-requests/{request_id}",
+    "/api/costs/summary",
     "/api/events",
     "/api/health",
     "/api/inbox",

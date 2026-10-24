@@ -8,6 +8,7 @@ from harness.github.client import GitHub, GitHubError
 from harness.github.labels import HARNESS_LABEL_PREFIX
 from harness.github.ledger import LedgerCorrupt, find_ledger, parse_ledger
 from harness.github.outbox import ledger_mirror_key
+from harness.ops.costs import restore_usage
 from harness.planner.proposal_store import LEDGER_KEY as PROPOSAL_LEDGER_KEY
 from harness.planner.proposal_store import restore_proposal_mirror
 from harness.store.db import Store
@@ -123,6 +124,11 @@ async def sync_repo(gh: GitHub, store: Store, repo: str, *, full: bool = False) 
                     snapshot = parse_ledger(ledger_comment.get("body") or "")
                     if snapshot:
                         ledgers[number] = snapshot
+                        try:
+                            # GitHub is the store: what the run spent comes back from its ledger.
+                            restore_usage(store, snapshot)
+                        except (TypeError, ValueError) as e:
+                            errors.append(f"Issue {number} usage not restored: {e}")
                 except LedgerCorrupt as e:
                     errors.append(f"Issue {number} ledger corrupt: {e}")
 

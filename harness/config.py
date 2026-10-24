@@ -7,6 +7,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from harness.ops.pricing import ModelPrice
+
 CONFIG_HOME = Path(os.environ.get("GARGI_HARNESS_CONFIG", Path.home() / ".config" / "gargi-harness"))
 
 
@@ -36,6 +38,8 @@ class GlobalConfig(BaseModel):
         default_factory=lambda: [Path.home() / ".config" / "jules" / "env", CONFIG_HOME / "env"]
     )
     repos: list[RepoEntry] = Field(default_factory=list)
+    # Model price overrides ([pricing."model"] tables); the key "unknown" replaces the fallback price.
+    pricing: dict[str, ModelPrice] = Field(default_factory=dict)
 
     @property
     def data_path(self) -> Path:
@@ -79,6 +83,11 @@ def save_global(cfg: GlobalConfig, path: Path | None = None) -> Path:
         lines.append("")
         lines.append("[[repos]]")
         lines.append(f"name = {json.dumps(repo.name)}")
+    for model, price in cfg.pricing.items():
+        lines.append("")
+        lines.append(f"[pricing.{json.dumps(model)}]")
+        lines.append(f"input_per_mtok = {price.input_per_mtok!r}")
+        lines.append(f"output_per_mtok = {price.output_per_mtok!r}")
     lines.append("")
 
     # write securely 0o600

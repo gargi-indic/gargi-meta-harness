@@ -29,6 +29,7 @@ from harness.github.labels import HARNESS_LABELS
 from harness.github.ledger import LedgerTooLarge, render_event, render_ledger
 from harness.github.outbox import Outbox
 from harness.llm.backend import ReviewBackend
+from harness.ops.costs import budget_state, mark_budget, recorded_total, usage_rev
 from harness.playbook.models import JoinNode, Node, ParallelNode, Playbook
 from harness.playbook.templating import Context, IssueCtx, PrCtx, RunCtx
 from harness.secrets import redact
@@ -52,6 +53,11 @@ from harness.store.repo import (
 CRASH_POINTS = ("before_advance", "after_advance", "after_step_update", "after_route", "after_mirror")
 ACTIVE_RUN_STATUSES = ("running", "needs-you")
 MAX_ROUTE_HOPS = 10
+BUDGET_WARN_FRACTION = 0.8
+# The escalation step a run gets when it exceeds ``limits.budget_usd``. It is not a playbook node: the inbox
+# shows any waiting step with ``needs_you``, and a node that the playbook lacks is listed as an escalation.
+BUDGET_NODE = "budget"
+BUDGET_EXCEEDED = "budget_exceeded"
 # Output caps tried in turn when the rendered ledger comment would be too large.
 _LEDGER_CAPS = (8 * 1024, 2 * 1024, 512, 0)
 
@@ -617,6 +623,7 @@ class Runner:
         node = playbook.nodes.get(step.node_id)
 
         self._crash("before_advance")
+        rev_before = usage_rev(run.context)
         result: Waiting | Done | None = None
         error: str | None = None
         if isinstance(node, ParallelNode):
@@ -637,8 +644,12 @@ class Runner:
         self._crash("after_advance")
         siblings = self._failed_all_join_siblings(run_id, playbook, step, node, result)
         cancel_errors = await self._cancel_sessions(siblings)
-        self._commit(run_id, step_id, playbook, node, result, error, siblings, cancel_errors)
+        after = get_run(self.store, run_id)
+        # Spend recorded by the executor must reach the ledger even when the step itself did not change.
+        usage_changed = after is not None and usage_rev(after.context) != rev_before
+        self._commit(run_id, step_id, playbook, node, result, error, siblings, cancel_errors, usage_changed)
         self._crash("after_mirror")
+        await self._check_budget(run_id, playbook, node)
         return True
 
     def _commit(
@@ -651,6 +662,7 @@ class Runner:
         error: str | None,
         siblings: list[StepRow] | None = None,
         cancel_errors: list[tuple[str, str]] | None = None,
+        usage_changed: bool = False,
     ) -> None:
         with self.store.tx():
             run = get_run(self.store, run_id)
@@ -688,7 +700,7 @@ class Runner:
                 for failed_id, message in cancel_errors or []:
                     self._event(run, "cancel_error", {"step": failed_id, "error": message})
                 self._commit_done(work, step, node, result, error)
-            if mirror:
+            if mirror or usage_changed:
                 self._finalize(work, prev_status)
 
     def _commit_waiting(self, work: _Work, step: StepRow, node: Node | None, result: Waiting) -> bool:
@@ -810,6 +822,116 @@ class Runner:
         self._crash("after_route")
         self._recompute_status(work)
 
+    # ---- per-run budget ------------------------------------------------------------------------------
+
+    async def _check_budget(self, run_id: str, playbook: Playbook, node: Node | None) -> None:
+        """Enforce ``limits.budget_usd``: warn once at 80%, cancel and fail once at 100%.
+
+        The flags live in the run's usage record, which goes to the ledger with every mirror, so a restart
+        (or a database rebuilt from the ledger) never fires an event twice or forgets one.
+        """
+        budget = playbook.limits.budget_usd if playbook.limits is not None else None
+        run = get_run(self.store, run_id)
+        if budget is None or budget <= 0 or run is None or run.status not in ACTIVE_RUN_STATUSES:
+            return
+        flags = budget_state(run.context)
+        if flags["exceeded"]:
+            return
+        spent = recorded_total(run.context)
+        if spent is None:
+            # Unknown cost is not zero: never cancel on it, say so once.
+            if node is not None and node.kind == "agent" and not flags["unknown_warned"]:
+                self._budget_note(
+                    run_id,
+                    "budget_unknown",
+                    None,
+                    [],
+                    data={"budget_usd": budget, "reason": "no usage reported by the agent"},
+                    unknown_warned=True,
+                )
+            return
+        if spent >= budget:
+            await self._exceed_budget(run_id, playbook, spent, budget)
+        elif spent >= BUDGET_WARN_FRACTION * budget and not flags["warned"]:
+            self._budget_note(
+                run_id,
+                "budget_warning",
+                "budget warning",
+                [f"spent ${spent:.2f} of ${budget:.2f} ({spent / budget:.0%})", f"run `{run_id}`"],
+                warned=True,
+                data={"spent_usd": spent, "budget_usd": budget},
+            )
+
+    def _budget_note(
+        self,
+        run_id: str,
+        kind: str,
+        title: str | None,
+        bullets: list[str],
+        *,
+        data: dict[str, Any] | None = None,
+        **flags: bool,
+    ) -> None:
+        with self.store.tx():
+            run = get_run(self.store, run_id)
+            if run is None or run.status not in ACTIVE_RUN_STATUSES:
+                return
+            work = _Work(
+                run=run, ctx=copy.deepcopy(run.context), playbook=self._playbook_for(run), status=run.status
+            )
+            mark_budget(work.ctx, **flags)
+            self._event(run, kind, data or {})
+            if title is not None:
+                work.comments.append((title, bullets))
+            self._finalize(work, run.status)
+
+    async def _exceed_budget(self, run_id: str, playbook: Playbook, spent: float, budget: float) -> None:
+        errors = await self._cancel_sessions(steps_for_run(self.store, run_id))
+        with self.store.tx():
+            run = get_run(self.store, run_id)
+            if run is None or run.status not in ACTIVE_RUN_STATUSES or budget_state(run.context)["exceeded"]:
+                return
+            work = _Work(run=run, ctx=copy.deepcopy(run.context), playbook=playbook, status="failed")
+            work.reason = BUDGET_EXCEEDED
+            mark_budget(work.ctx, exceeded=True, warned=True)
+            now = self.store.now()
+            for step in steps_for_run(self.store, run_id):
+                if step.status in ("pending", "running", "waiting"):
+                    update_step(
+                        self.store,
+                        step.id,
+                        status="failed",
+                        outcome="cancelled",
+                        poll_after=None,
+                        ended_at=now,
+                    )
+            summary = f"spent ${spent:.2f} of the ${budget:.2f} budget"
+            insert_step(
+                self.store,
+                StepRow(
+                    id=f"{run_id}/{BUDGET_NODE}/1",
+                    run_id=run_id,
+                    node_id=BUDGET_NODE,
+                    visit=1,
+                    status="waiting",
+                    outcome=None,
+                    ref=None,
+                    output={
+                        "needs_you": True,
+                        "reason": f"Budget exceeded: {summary}. The run was stopped.",
+                        "links": [],
+                    },
+                    poll_after=None,
+                    started_at=now,
+                    ended_at=None,
+                ),
+            )
+            for step_id, message in errors:
+                self._event(run, "cancel_error", {"step": step_id, "error": message})
+            self._event(run, BUDGET_EXCEEDED, {"spent_usd": spent, "budget_usd": budget})
+            work.comments.append(("budget exceeded", [summary, f"run `{run_id}`"]))
+            self._finalize(work, run.status)
+
     async def run_forever(self, stop: asyncio.Event, idle_sleep: float = 1.0) -> None:
         """Tick until ``stop`` is set. A failing tick is recorded as an event and does not end the loop."""
         while not stop.is_set():
@@ -893,6 +1015,11 @@ class Runner:
             visits = work.ctx.setdefault("visits", {})
             if node.max_visits is not None and visits.get(node_id, 0) + 1 > node.max_visits:
                 raise ValueError(f"node {node_id!r} has reached max_visits={node.max_visits}")
+            for s in steps_for_run(self.store, run_id):
+                if s.node_id == BUDGET_NODE and s.status == "waiting":  # the human has seen the escalation
+                    update_step(
+                        self.store, s.id, status="done", outcome="resolved", ended_at=self.store.now()
+                    )
             visits[node_id] = visits.get(node_id, 0) + 1
             previous = max(steps, key=lambda s: s.visit) if steps else None
             prev = work.ctx.get("prev_for", {}).get(previous.id) if previous else None

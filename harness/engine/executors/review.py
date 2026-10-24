@@ -9,7 +9,7 @@ adds only the PR comment (``--request-changes`` fails on PRs opened under the us
 from typing import Any
 
 from harness.engine.executors.base import Done, ExecContext
-from harness.llm.backend import ReviewBackend
+from harness.llm.backend import ReviewBackend, usage_sink
 from harness.llm.reviewer import (
     ReviewResult,
     load_builtin_checklist,
@@ -18,6 +18,7 @@ from harness.llm.reviewer import (
     run_review,
     valid_checklist_name,
 )
+from harness.ops.costs import llm_usage_sink
 from harness.playbook.models import ReviewNode
 from harness.secrets import redact
 from harness.store.repo import StepRow, append_event, get_issue, steps_for_run, update_step
@@ -53,7 +54,8 @@ class ReviewExecutor:
             return built
         prompt, extra = built
 
-        result = await run_review(self.backend, system=system, prompt=prompt, workdir=None)
+        with usage_sink(llm_usage_sink(ctx.store, ctx.run.id, step.id, "review")):
+            result = await run_review(self.backend, system=system, prompt=prompt, workdir=None)
         output = _output(result)
         output.update(extra)
         update_step(ctx.store, step.id, output=output)
