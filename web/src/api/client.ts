@@ -53,3 +53,17 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   });
   return handleResponse<T>(res);
 }
+
+export async function apiPut<T>(path: string, body: unknown, headers: Record<string, string> = {}): Promise<T> {
+  const res = await fetch(path, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+  return handleResponse<T>(res);
+}
