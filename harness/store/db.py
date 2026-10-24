@@ -143,6 +143,27 @@ MIGRATIONS: list[list[str]] = [
         )
         """,
     ],
+    [
+        # Detailed spend rows. A MIRROR: the per-run totals also travel in the run's ledger snapshot
+        # (`usage`), and `harness sync` refills this table from it (GitHub is the store).
+        """
+        CREATE TABLE usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            step_id TEXT,
+            source TEXT NOT NULL,
+            adapter TEXT NOT NULL,
+            model TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cost_usd REAL NOT NULL,
+            estimated INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX idx_usage_run ON usage (run_id)",
+        "CREATE INDEX idx_usage_created ON usage (created_at)",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 

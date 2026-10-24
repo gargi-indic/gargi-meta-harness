@@ -146,6 +146,14 @@ class AgentsEnabled(Schema):
     agents: list[AgentConfigOut] = Field(description="Enabled agents, sorted by name.")
 
 
+class RunCostOut(Schema):
+    usd: float | None = Field(
+        description="Total spent by the run in USD; null (n/a) when no usage was reported."
+    )
+    estimated: bool = Field(description="True when any part of the cost was estimated from a price table.")
+    by_node: dict[str, float] = Field(description="USD spent per playbook node.")
+
+
 class RunDetail(Schema):
     run: RunSummary = Field(description="The run.")
     playbook: dict[str, Any] | None = Field(
@@ -153,6 +161,7 @@ class RunDetail(Schema):
     )
     steps: list[StepOut] = Field(description="Steps ordered by start time, visit and id.")
     visit_counts: dict[str, int] = Field(description="Highest visit number per node.")
+    cost: RunCostOut = Field(description="What the run has spent so far.")
 
 
 class ActivityItem(Schema):
@@ -166,3 +175,19 @@ class ActivityItem(Schema):
 class ActivityPage(Schema):
     items: list[ActivityItem] = Field(description="Activity items after the requested seq, oldest first.")
     next: int = Field(description="Last seq returned, or the requested 'after' when there are no items.")
+
+
+class RunCostRow(Schema):
+    run_id: str = Field(description="Run id.")
+    issue: int | None = Field(
+        description="Issue number of the run, null if the run is not in the local store."
+    )
+    usd: float = Field(description="USD spent by the run in the period.")
+
+
+class CostsSummary(Schema):
+    total_usd: float = Field(description="Total spent in the period, in USD.")
+    by_adapter: dict[str, float] = Field(
+        description="USD spent per adapter (the reviewer is listed as 'reviewer')."
+    )
+    by_run: list[RunCostRow] = Field(description="USD spent per run, highest first.")

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from harness.config import RepoConfig
 from harness.dag import blocked
 from harness.engine.model import TERMINAL_STATUSES
+from harness.ops.costs import UsageRepo
 from harness.playbook.load import builtin_playbooks
 from harness.secrets import redact
 from harness.server.schemas import (
@@ -22,6 +23,7 @@ from harness.server.schemas import (
     InboxFinding,
     InboxItem,
     InboxPr,
+    RunCostOut,
     RunSummary,
     StepOut,
 )
@@ -215,6 +217,12 @@ def run_summary(run: RunRow, steps: list[StepRow], title: str | None) -> RunSumm
         created_at=run.created_at,
         updated_at=run.updated_at,
     )
+
+
+def run_cost_out(store: Store, run_id: str) -> RunCostOut:
+    """What the run spent, from the local usage mirror; ``usd`` is None (n/a) when nothing was reported."""
+    cost = UsageRepo(store).run_cost(run_id)
+    return RunCostOut(usd=cost.usd if cost.recorded else None, estimated=cost.estimated, by_node=cost.by_node)
 
 
 def step_out(step: StepRow) -> StepOut:

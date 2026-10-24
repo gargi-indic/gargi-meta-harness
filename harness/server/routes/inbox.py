@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from harness.engine.model import TERMINAL_STATUSES
+from harness.ops.costs import budget_state
 from harness.server.deps import get_store
 from harness.server.derive import inbox_item, needs_human
 from harness.server.schemas import InboxItem
@@ -16,7 +17,8 @@ router = APIRouter(prefix="/api", tags=["inbox"])
 async def get_inbox(store: Annotated[Store, Depends(get_store)]) -> list[InboxItem]:
     items: list[InboxItem] = []
     for run in list_runs(store):
-        if run.status in TERMINAL_STATUSES:
+        # A run stopped for exceeding its budget is failed but still waits for a human on its escalation.
+        if run.status in TERMINAL_STATUSES and not budget_state(run.context)["exceeded"]:
             continue
         steps = steps_for_run(store, run.id)
         waiting = [s for s in steps if needs_human(s)]

@@ -25,10 +25,13 @@ from harness.adapters.base import (
     PrRef,
     SessionRef,
     StartRequest,
+    Usage,
 )
 from harness.adapters.guard import DEFAULT_PROTECTED, PathGuard
 from harness.config import AgentConfig
 from harness.github.client import GitHub
+from harness.ops.pricing import PricingTable
+from harness.ops.sdk_usage import usage_from_result
 from harness.publish import ProtectedPathViolation, PublishError, publish_worktree, push_revision
 from harness.secrets import redact
 from harness.workspaces import Worktree, WorktreeManager
@@ -188,7 +191,9 @@ class ClaudeAdapter:
         session_factory: ClaudeSessionFactory = default_factory,
         store: Any = None,
         protected_paths: Sequence[str] = DEFAULT_PROTECTED,
+        pricing: PricingTable | None = None,
     ) -> None:
+        self.pricing = pricing
         self.caps = Capabilities(
             plan_approval=True,
             messaging=True,
@@ -347,6 +352,11 @@ class ClaudeAdapter:
                         data["plan"] = redact(block.input["plan"], extra=[api_key] if api_key else None)
                         data["state"] = AgentState.PLAN_READY
         elif kind == "ResultMessage":
+            # The SDK reports the session's running cost on every result, errors included. Kept as the
+            # cumulative reading; the runner turns readings into deltas.
+            usage = usage_from_result(msg, default_model=self.config.model, table=self.pricing)
+            if usage is not None:
+                data["usage"] = usage.model_dump(mode="json")
             subtype = str(getattr(msg, "subtype", "") or "")
             if getattr(msg, "is_error", False) or subtype.startswith("error"):
                 detail = getattr(msg, "result", None) or "; ".join(getattr(msg, "errors", None) or [])
@@ -490,6 +500,7 @@ class ClaudeAdapter:
             activity=[ActivityItem(ts=a["ts"], kind=a["kind"], text=a["text"]) for a in new_activities],
             error=data.get("error"),
             poll_after=1.0 if ref.id in self._tasks else 60.0,
+            usage=Usage(**data["usage"]) if data.get("usage") else None,
         )
 
     async def approve_plan(self, ref: SessionRef, note: str | None = None) -> None:

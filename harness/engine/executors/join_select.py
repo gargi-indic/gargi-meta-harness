@@ -16,8 +16,9 @@ following ``ci`` / ``pr_review`` / ``merge`` nodes work on the winner unchanged.
 from typing import Any
 
 from harness.engine.executors.base import Done, ExecContext
-from harness.llm.backend import ReviewBackend
+from harness.llm.backend import ReviewBackend, usage_sink
 from harness.llm.selector import Candidate, SelectionResult, select_candidate
+from harness.ops.costs import llm_usage_sink
 from harness.playbook.models import JoinNode
 from harness.secrets import redact
 from harness.store.repo import StepRow, update_step
@@ -70,12 +71,13 @@ async def select_join(
     else:
         if backend is None:
             raise RuntimeError("join select with several candidates needs a selector backend")
-        result = await select_candidate(
-            backend=backend,
-            issue=ctx.template.issue,
-            candidates=[f["candidate"] for f in facts.values()],
-            rubric=node.rubric or [],
-        )
+        with usage_sink(llm_usage_sink(ctx.store, ctx.run.id, step.id, "select")):
+            result = await select_candidate(
+                backend=backend,
+                issue=ctx.template.issue,
+                candidates=[f["candidate"] for f in facts.values()],
+                rubric=node.rubric or [],
+            )
 
     winner = result.winner
     output: dict[str, Any] = {

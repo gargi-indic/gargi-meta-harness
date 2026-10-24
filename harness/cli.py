@@ -26,6 +26,7 @@ from harness.github.commands import allowed_logins, decide, default_retry_node, 
 from harness.github.labels import ensure_harness_labels
 from harness.github.outbox import Outbox, OutboxOpFailed, ledger_mirror_key
 from harness.lock import LockHeld
+from harness.ops.costs import UsageRepo, parse_since
 from harness.planner.materialize import MaterializeContext, MaterializeError, materialize, plan_run_key
 from harness.planner.plan_doc import PlanDoc, PlanDocError, load_plan_doc
 from harness.planner.plan_gate import (
@@ -254,6 +255,32 @@ def gates(repo: str = typer.Option(None, "--repo", help="Only gates of this repo
                 continue
             issue = f"#{run.issue}" if run else "-"
             print(f"{gate.id:<40} {gate.run_id:<20} {issue:<7} {gate.name:<12} {gate.created_at}")
+    finally:
+        store.close()
+
+
+@app.command()
+def costs(
+    since: str = typer.Option(None, "--since", help="Only spend since this: 24h, 7d or an ISO date."),
+) -> None:
+    """Show what the runs spent: total, per adapter and per run."""
+    try:
+        start = parse_since(since) if since else None
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
+    store = _open_store()
+    try:
+        usage = UsageRepo(store)
+        print(f"{'RUN':<40} {'ISSUE':<7} {'USD':>10}")
+        for row in usage.by_run(start):
+            issue = f"#{row['issue']}" if row["issue"] is not None else "-"
+            print(f"{row['run_id']:<40} {issue:<7} {row['usd']:>10.4f}")
+        print()
+        print(f"{'ADAPTER':<40} {'':<7} {'USD':>10}")
+        for adapter, usd in usage.by_adapter(start).items():
+            print(f"{adapter:<40} {'':<7} {usd:>10.4f}")
+        print()
+        print(f"{'TOTAL':<40} {'':<7} {usage.total_since(start):>10.4f}")
     finally:
         store.close()
 

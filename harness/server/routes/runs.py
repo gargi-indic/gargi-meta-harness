@@ -8,6 +8,7 @@ from harness.server.derive import (
     activity_item,
     ordered_steps,
     playbook_dict,
+    run_cost_out,
     run_summary,
     step_out,
     visit_counts,
@@ -68,4 +69,5 @@ async def get_run_route(run_id: str, store: Annotated[Store, Depends(get_store)]
         playbook=playbook_dict(run),
         steps=[step_out(s) for s in steps],
         visit_counts=visit_counts(steps),
+        cost=run_cost_out(store, run.id),
     )

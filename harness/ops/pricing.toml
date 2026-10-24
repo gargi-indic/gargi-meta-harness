@@ -1,0 +1,24 @@
+# Placeholder price table: model name -> USD per million tokens.
+#
+# These numbers are NOT real prices. They only exist so that a run whose provider reports tokens but no cost
+# still gets a rough, clearly "estimated" figure. Set real prices in the `[pricing]` table of the global
+# config (~/.config/gargi-harness/config.toml), which overrides this file entry by entry.
+#
+# A model is matched by exact name first, then by the longest table key that is a prefix of the name.
+# A model that matches nothing is priced with `[unknown]` and the result is marked estimated.
+
+[unknown]
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+
+[models.claude-opus]
+input_per_mtok = 15.0
+output_per_mtok = 75.0
+
+[models.claude-sonnet]
+input_per_mtok = 3.0
+output_per_mtok = 15.0
+
+[models.claude-haiku]
+input_per_mtok = 1.0
+output_per_mtok = 5.0

@@ -23,6 +23,7 @@ from harness.engine.runner import Runner
 from harness.github.client import GitHub
 from harness.github.outbox import Outbox
 from harness.llm.backend import ClaudeSdkBackend, ReviewBackend
+from harness.ops.pricing import default_table
 from harness.playbook.load import builtin_playbooks
 from harness.secrets import github_token, load_env_files
 from harness.store.db import Store
@@ -96,6 +97,7 @@ def build_app(
 
     repo_configs = _stored_repo_configs(store, cfg)
 
+    pricing = default_table().with_overrides(cfg.pricing)
     if adapters is None:
         adapters = AdapterRegistry()
         adapters.register(FakeAdapter())
@@ -123,10 +125,15 @@ def build_app(
             if claude_enabled or not claude_entries:
                 claude_cfg = ClaudeAgentConfig(**(claude_enabled or [AgentConfig()])[0].model_dump())
                 adapters.register(
-                    ClaudeAdapter(workspaces=WorktreeManager(cfg.worktrees_dir), gh=client, config=claude_cfg)
+                    ClaudeAdapter(
+                        workspaces=WorktreeManager(cfg.worktrees_dir),
+                        gh=client,
+                        config=claude_cfg,
+                        pricing=pricing,
+                    )
                 )
 
-    backend = review_backend if review_backend is not None else ClaudeSdkBackend()
+    backend = review_backend if review_backend is not None else ClaudeSdkBackend(pricing=pricing)
     executors = default_registry(review_backend=backend)
     outbox = Outbox(store, client, clock=clock, sleep=sleep)
     runner = Runner(
