@@ -40,6 +40,7 @@ ALLOWED_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob", "Edit", "Write", "Bash
 DEFAULT_APPROVAL_NOTE = "Plan approved. Implement it."
 MAX_CONSECUTIVE_DENIALS = 3
 _ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR")
+_BLANKED_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "JULES_API_KEY", "CODEX_API_KEY")
 _PLAN_DENIAL = "The plan was recorded for approval; stop now and wait for the operator."
 
 
@@ -146,6 +147,11 @@ def default_factory(options: ClaudeOptions) -> ClaudeSession:
     return _SdkSession(sdk.ClaudeSDKClient(build_sdk_options(options)), sdk.ClaudeSDKError)
 
 
+def _looks_secret(name: str) -> bool:
+    upper = name.upper()
+    return any(word in upper for word in ("TOKEN", "SECRET", "PASSWORD")) or upper.endswith("_KEY")
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -207,6 +213,14 @@ class ClaudeAdapter:
 
     def _env(self) -> dict[str, str]:
         env = {name: os.environ[name] for name in _ENV_PASSTHROUGH if name in os.environ}
+        # The SDK merges options.env over os.environ, so other secrets are blanked rather than omitted.
+        for name in (*_BLANKED_ENV, *os.environ):
+            if (
+                name not in env
+                and name != "ANTHROPIC_API_KEY"
+                and (name in _BLANKED_ENV or _looks_secret(name))
+            ):
+                env[name] = ""
         key = _api_key()
         if key:
             env["ANTHROPIC_API_KEY"] = key
@@ -385,6 +399,10 @@ class ClaudeAdapter:
         finally:
             if self._tasks.get(ref.id) is asyncio.current_task():
                 self._tasks.pop(ref.id, None)
+            if data["state"] == AgentState.FAILED:
+                failed = self._sessions.pop(ref.id, None)
+                if failed is not None:
+                    await failed.disconnect()
 
     def _worktree(self, data: dict[str, Any]) -> Worktree:
         return Worktree(

@@ -483,9 +483,49 @@ async def test_env_is_minimal_and_activity_and_data_are_redacted(git_env, monkey
     snapshot = await run_to_idle(adapter, ref)
     env = factory.sessions[0].options.env
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-secret-1234567890"
-    assert set(env) <= {"PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "ANTHROPIC_API_KEY"}
+    allowed = {"PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR", "ANTHROPIC_API_KEY"}
+    assert all(value == "" for name, value in env.items() if name not in allowed)
     assert snapshot.activity and "sk-ant-secret-1234567890" not in snapshot.activity[0].text
     assert "sk-ant-secret-1234567890" not in json.dumps(ref.data, default=str)
+
+
+async def test_secret_looking_env_vars_are_blanked(git_env, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-1234567890")
+    monkeypatch.setenv("GH_TOKEN", "gh-token-1234567890")
+    monkeypatch.setenv("JULES_API_KEY", "jules-key-1234567890")
+    monkeypatch.setenv("CODEX_API_KEY", "codex-key-1234567890")
+    monkeypatch.setenv("FOO_SECRET", "foo-secret-1234567890")
+    monkeypatch.setenv("DB_PASSWORD", "pw-1234567890")
+    _, _, wt, _ = git_env
+    factory = Factory([[ResultMessage()]])
+    adapter = make_adapter(git_env, factory)
+    ref = await adapter.start(make_req(wt, "blank"))
+    await adapter.wait_idle(ref)
+    env = factory.sessions[0].options.env
+    for name in ("GH_TOKEN", "JULES_API_KEY", "CODEX_API_KEY", "FOO_SECRET", "DB_PASSWORD", "GITHUB_TOKEN"):
+        assert env[name] == ""
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-secret-1234567890"
+
+
+def test_build_sdk_options_forwards_env(tmp_path):
+    pytest.importorskip("claude_agent_sdk")
+    env = {"GH_TOKEN": "", "ANTHROPIC_API_KEY": "k"}
+    sdk_options = build_sdk_options(
+        ClaudeOptions(cwd=tmp_path, permission_mode="plan", allowed_tools=(), max_turns=1, env=env)
+    )
+    assert sdk_options.env == env
+
+
+async def test_failed_turn_disconnects_exactly_once(git_env):
+    _, _, wt, _ = git_env
+    factory = Factory([[ResultMessage(is_error=True, subtype="error_max_turns", result="x")]])
+    adapter = make_adapter(git_env, factory)
+    ref = await adapter.start(make_req(wt, "leak"))
+    snapshot = await run_to_idle(adapter, ref)
+    assert snapshot.state == AgentState.FAILED
+    assert factory.sessions[0].disconnects == 1
+    await adapter.cancel(ref)
+    assert factory.sessions[0].disconnects == 1
 
 
 def test_default_factory_builds_sdk_options_without_connecting(tmp_path):
