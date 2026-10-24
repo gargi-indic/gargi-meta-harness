@@ -41,18 +41,22 @@ The UI design system is in `docs/DESIGN.md` and `docs/design/tokens.css`.
 
 ## State (Handover 2026-10-24, end of seventh orchestrator session)
 **Done:**
-- **M0, M1, M2, M3:** complete (epics #2, #10, #22, #33 closed).
-- **M3 merged:** #34 (PR #91), #35 (#92), #36 (#93), #39 (#94), #38 (#95), #37 (#96), #40 (#97), #41 (#98), #42 (#99). Jules built #35, #38, #39; Sonnet built #34, #36, #37, #40, #41, #42 and did the fix rounds. `main` CI is green (1407 tests, web checks).
-- **Binding specs:** `.orchestrator/specs/` m23..m42.
+- **M0, M1, M2, M3, M4:** complete (epics #2, #10, #22, #33, #43 closed).
+- **M3 (PRs #91-#99), M4:** #44 plan gate (#100), #45 decomposer (#101), #47 materialize (#102), #46 decompose executor (#103), #48 planner API (#104), #50 decompose-epic playbook (#105), #49 Planner screen (#106). Jules built #35, #38, #39; Sonnet subagents built everything else. `main` CI is green (1740+ Python tests, web tests, Playwright).
+- **Binding specs:** `.orchestrator/specs/` m23..m50.
+- **Design rule recorded by the human:** GitHub is the state store; SQLite is only a rebuildable cache/outbox/event log. Write to GitHub first (control-issue ledger, marker comments, outbox) and mirror locally; `harness sync` must restore any new state.
+- **Product direction from the human (not yet scheduled):** canvas Plan node (attach an issue, pick an agent, freeze) -> Orchestrator node -> Claude/Antigravity worker nodes with an eval-check loop back to the orchestrator; optional human gate on every node with an editable brief/scope; everything generated from the plan. Plan freeze = the plan gate approval of #44 (sha-bound). Not built: an `orchestrator` node kind, a gate on any node, editable brief/scope, plan node on the canvas.
 
-**Waiting on the human:**
-- **#44 M4.1 plan gate is `needs-discussion`.** Escalation is on issue #1 (comment `**2026-10-24 · #42 merged; Epic #33 (M3) complete`). Issue's proposed default: approved when EITHER the label `harness:plan-approved` is on the control issue (set by repo owner/allowlisted user) OR the PR that last modified the plan doc is merged; bound to the plan doc blob sha, stale if the doc changes. Do not start #44 or #50 until the human answers "accept default" or an alternative.
-- **M4 not started.** The M4 build-order table is in the #1 body (#44 ⛔, #45-#50 ⏳). #45 (decomposer), #47 (issue creation) and #46 do not depend on #44; only #50 does. Ask the human whether to proceed with #45 before the decision on #44.
-- M5 (#51): #52, #53 are also `needs-discussion`.
+**Waiting on the human (escalated on #1, comment `**2026-10-24 · #49 merged; Epic #43 (M4) complete`):**
+- **#52 Copilot adapter:** proposed default = assignee route behind a `CopilotTransport` protocol, optional second `tasks` transport (`agents.copilot.transport`, default `assignee`).
+- **#53 agy spike (half-manual):** agent writes the probe script, parser and findings template with synthetic fixtures; the human runs the probe locally (needs `agy` installed and logged in), commits real captures and fills `docs/spikes/antigravity.md`. #54 (Antigravity adapter) and #55 depend on it.
+- Not blocked: #56 cost tracking, #58 notifications, then #57, #59.
 
-**Running:** nothing. No Jules session, no background wait, no cron job.
+**Open follow-ups:** a session chip exists for the author check of proposal comments (see `harness/planner/proposal_store.py`); slash-command plan approval; rendered markdown in the plan preview; real sandbox runs of the tournament and decompose-epic playbooks (manual, `docs/PLAN.md` "Verification").
+
+**Running:** nothing. No Jules session, no cron job, no subagent.
 
 ## How to Resume
-1. Boot per the skill (section 0 and 7): `gh` only via `bash -ic '...'`; `gh issue view` is broken, use `gh api`; the orchestrator's comments are posted from the human's account, so a human reply is a comment NOT starting with `**20`.
-2. Read #1 and check for the human's answer on #44 (and whether to start #45).
-3. Jules stalled on 4 of the last 6 tasks: for new tasks write the binding spec first (facts verified against `git show origin/main:<path>`; the issue texts are partly stale), then delegate to a Sonnet subagent with a fresh scratchpad clone, or use Jules only with plan polling every 2-3 minutes. Review every PR with `gh pr view --json files` and the diff before merging; check for stray root files and for pre-existing test edits.
+1. Boot per the skill (sections 0 and 7): `gh` only via `bash -ic '...'`; `gh issue view` is broken, use `gh api`; a human reply is a comment NOT starting with `**20` (the orchestrator posts from the human's account).
+2. Read #1; check for answers on #52/#53. M5 order: #56, #58 can start now; #52/#53 after the decisions; #54 after real agy findings; #55; #57, #59 after #56.
+3. Working method that worked in M3-M4: write a binding spec first (`.orchestrator/specs/mNN-*.txt`, facts verified with `git show origin/main:<path>` because issue texts are partly stale), push it to main from a clean clone, delegate to a Sonnet subagent with a fresh scratchpad clone (branch `claude-NN-...`, stop and report on spec conflicts), review every PR with `gh pr view --json files`, the diff and CI, check for stray root files and pre-existing test edits, then squash-merge and tick. Jules stalled on 4 of 6 tasks; use it only with plan polling every 2-3 minutes.
