@@ -8,6 +8,7 @@ import { RunsListPage } from '../screens/run/RunsListPage';
 import { RunPage } from '../screens/run/RunPage';
 import { PlaybooksListPage } from '../screens/editor/PlaybooksListPage';
 import { EditorPage } from '../screens/editor/EditorPage';
+import { AgentsPage } from '../screens/agents/AgentsPage';
 import { PlannerPage } from '../screens/planner/PlannerPage';
 
 // Lazy load DevCanvasPage so it can be tree-shaken in prod
@@ -28,6 +29,7 @@ export function AppRoutes() {
       <Route path="/playbooks/new" element={<EditorPage />} />
       <Route path="/playbooks/:id" element={<EditorPage />} />
       <Route path="/planner" element={<PlannerPage />} />
+      <Route path="/agents" element={<AgentsPage />} />
 
       {import.meta.env.DEV && DevCanvasPage && (
         <Route path="/dev/canvas" element={

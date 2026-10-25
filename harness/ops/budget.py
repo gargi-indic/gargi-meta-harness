@@ -43,9 +43,13 @@ class DailyBudget:
         now = self.clock().astimezone(self.tz)
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
+    def day_start(self) -> str:
+        """The last local midnight, as a store timestamp."""
+        return self._local_midnight().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     def status(self) -> BudgetStatus:
         midnight = self._local_midnight()
-        midnight_utc = midnight.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        midnight_utc = self.day_start()
 
         next_midnight = midnight + timedelta(days=1)
         resets_at = next_midnight.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

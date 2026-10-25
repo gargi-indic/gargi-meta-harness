@@ -216,3 +216,66 @@ export interface PlaybookDetail extends PlaybookSummary {
   yaml: string;
   parsed: Record<string, unknown> | null;
 }
+
+export interface HaltInfoOut {
+  reason: 'kill_switch' | 'daily_budget';
+  since: string;
+  by: string;
+}
+
+export interface BudgetStatusOut {
+  limit_usd: number | null;
+  spent_usd: number;
+  remaining_usd: number | null;
+  resets_at: string;
+  exceeded: boolean;
+  unknown_cost_runs: number;
+}
+
+export interface OpsStatusOut {
+  halted: HaltInfoOut | null;
+  budget: BudgetStatusOut;
+}
+
+export type AgentHealthStatus = 'ok' | 'degraded' | 'down' | 'disabled' | 'unknown';
+
+export interface AgentHealthOut {
+  status: AgentHealthStatus;
+  detail: string;
+  checked_at: string;
+}
+
+export interface AgentCapsOut {
+  plan_approval: boolean;
+  messaging: boolean;
+  opens_pr: boolean;
+  local_workspace: boolean;
+}
+
+export interface AgentSessionOut {
+  run_id: string;
+  issue: number;
+  step: string;
+  started_at: string | null;
+  state: string;
+  cost_usd: number | null;
+}
+
+export interface AgentOut {
+  name: string;
+  enabled: boolean;
+  health: AgentHealthOut;
+  caps: AgentCapsOut;
+  max_concurrency: number;
+  in_use: number;
+  active_sessions: AgentSessionOut[];
+  today_cost_usd: number | null;
+}
+
+export interface AgentRunCostRow {
+  run_id: string;
+  issue: number | null;
+  agent: string | null;
+  usd: number | null;
+  estimated: boolean;
+}

@@ -71,6 +71,16 @@ def _paths_overlap(a: str, b: str) -> bool:
     return False
 
 
+def count_active_per_agent(active: Sequence[RunRow], names: Sequence[str]) -> dict[str, int]:
+    """How many of the active runs each of ``names`` has (the dispatcher's concurrency rule: one per run)."""
+    counts = {name: 0 for name in names}
+    for run in active:
+        agent = run.context.get("agent")
+        if agent in counts:
+            counts[agent] += 1
+    return counts
+
+
 def make_semaphores(caps: Mapping[str, int]) -> dict[str, asyncio.Semaphore]:
     return {name: asyncio.Semaphore(cap) for name, cap in caps.items()}
 
@@ -120,14 +130,11 @@ class Dispatcher:
         open_by_repo = {repo: open_blockers(list(issues.values())) for repo, issues in known.items()}
 
         active_issues = {(run.repo, run.issue) for run in active}
-        active_per_agent = {name: 0 for name in self.caps}
+        active_per_agent = count_active_per_agent(active, list(self.caps))
         claimed: list[
             tuple[str, int, list[str]]
         ] = []  # (repo, issue, path hints) of active and selected work
         for run in active:
-            agent = run.context.get("agent")
-            if agent in active_per_agent:
-                active_per_agent[agent] += 1
             issue = known[run.repo].get(run.issue)
             claimed.append((run.repo, run.issue, parse_path_hints(issue.body if issue else None)))
 

@@ -243,3 +243,54 @@ class BudgetRequest(Schema):
         ge=0,
         description="The new daily limit in USD that overrides the config, or null to clear the override.",
     )
+
+
+class AgentHealthOut(Schema):
+    status: Literal["ok", "degraded", "down", "disabled", "unknown"] = Field(
+        description="Health from local checks only (keys by name, PATH, importable SDK); no agent is called."
+    )
+    detail: str = Field(description="What the check found, with names only, never secret values.")
+    checked_at: str = Field(description="When the check ran (ISO 8601 UTC); results are cached for 30 s.")
+
+
+class AgentCapsOut(Schema):
+    plan_approval: bool = Field(description="The agent proposes a plan that a human can approve.")
+    messaging: bool = Field(description="The agent accepts follow-up messages.")
+    opens_pr: bool = Field(description="The agent opens the pull request itself.")
+    local_workspace: bool = Field(description="The agent works in a local workspace the harness provides.")
+
+
+class AgentSessionOut(Schema):
+    run_id: str = Field(description="Run that owns the session.")
+    issue: int = Field(description="Issue number of the run.")
+    step: str = Field(description="Id of the active agent step.")
+    started_at: str | None = Field(description="When the step started (ISO 8601).")
+    state: str = Field(description="Status of the step: running or waiting.")
+    cost_usd: float | None = Field(
+        description="USD the run has spent so far; null (n/a) when none was reported."
+    )
+
+
+class AgentOut(Schema):
+    name: str = Field(description="Agent name.")
+    enabled: bool = Field(
+        description="Whether the agent is on: its key is set, or it is enabled in a repo config."
+    )
+    health: AgentHealthOut = Field(description="The agent's health.")
+    caps: AgentCapsOut = Field(description="What the agent can do.")
+    max_concurrency: int = Field(description="Runs the dispatcher lets the agent have at once.")
+    in_use: int = Field(description="Active runs of the agent (the dispatcher's counting rule).")
+    active_sessions: list[AgentSessionOut] = Field(description="Active agent steps of the agent's runs.")
+    today_cost_usd: float | None = Field(
+        description="USD the agent spent since the last local midnight; null when it reported nothing today."
+    )
+
+
+class AgentRunCostRow(Schema):
+    run_id: str = Field(description="Run id.")
+    issue: int | None = Field(
+        description="Issue number of the run, null if the run is not in the local store."
+    )
+    agent: str | None = Field(description="Agent of the run, null when unknown.")
+    usd: float | None = Field(description="USD spent by the run in the period; null (n/a) when unknown.")
+    estimated: bool = Field(description="True when any part of the cost was estimated from a price table.")
