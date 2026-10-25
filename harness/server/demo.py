@@ -160,6 +160,14 @@ class _DemoRunner(Runner):
 
     only_run: str | None = None
 
+    async def tick(self) -> int:
+        # The seeded runs stay as seeded: a kill switch (or any control request) for them is acknowledged, not applied.
+        self.store.execute(
+            "UPDATE control_requests SET handled_at = ?, result_json = ? WHERE handled_at IS NULL AND run_id IS NOT ?",
+            (self.store.now(), '{"ok": true, "note": "not applied to seeded demo runs"}', self.only_run),
+        )
+        return await super().tick()
+
     def _due_steps(self, now_iso: str) -> list[StepRow]:
         return [s for s in super()._due_steps(now_iso) if s.run_id == self.only_run]
 

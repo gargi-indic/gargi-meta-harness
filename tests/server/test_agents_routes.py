@@ -115,3 +115,18 @@ async def test_demo_mode_scripts_health_and_cost() -> None:
         costs = (await c.get("/api/agents/costs")).json()
         assert any(r["estimated"] for r in costs)
         assert (await c.get("/api/ops/status")).status_code == 200
+
+
+async def test_demo_kill_does_not_cancel_the_seeded_runs() -> None:
+    from harness.server.demo import create_demo_app
+    from harness.store.repo import get_run
+    from tests.server.helpers import make_client
+
+    app, _ = create_demo_app(token="t", port=7777)
+    async with make_client(app, headers={"Cookie": "harness_token=t"}) as c:
+        assert (await c.post("/api/ops/kill", json={"confirm": "KILL"})).status_code == 200
+        await app.state.driver.step()
+        assert (await c.post("/api/ops/resume", json={})).status_code == 200
+        await app.state.driver.step()
+    seed = app.state.seed
+    assert get_run(app.state.store, seed.run_a).status == "needs-you"
