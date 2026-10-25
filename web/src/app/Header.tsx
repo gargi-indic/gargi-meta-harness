@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useHealth } from '../api/queries';
 import { StatusTag } from '../ui/StatusTag';
+import { OpsStrip } from './OpsStrip';
 
 export function Header() {
   const [open, setOpen] = useState(false);
@@ -27,8 +28,10 @@ export function Header() {
           <NavLink to="/runs" onClick={() => setOpen(false)}>Runs</NavLink>
           <NavLink to="/playbooks" onClick={() => setOpen(false)}>Playbooks</NavLink>
           <NavLink to="/planner" onClick={() => setOpen(false)}>Planner</NavLink>
+          <NavLink to="/agents" onClick={() => setOpen(false)}>Agents</NavLink>
         </nav>
       </div>
+      <OpsStrip />
     </header>
   );
 }

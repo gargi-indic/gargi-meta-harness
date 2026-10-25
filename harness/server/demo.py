@@ -22,6 +22,7 @@ from harness.adapters.base import (
     PrRef,
 )
 from harness.adapters.fake import FakeAdapter
+from harness.adapters.health import AgentHealth
 from harness.config import RepoConfig
 from harness.engine.executors.agent import AgentExecutor
 from harness.engine.executors.base import Done, ExecContext, ExecutorRegistry, Waiting
@@ -29,6 +30,7 @@ from harness.engine.executors.escalate import EscalateExecutor
 from harness.engine.executors.gate import GateExecutor
 from harness.engine.runner import Runner
 from harness.github.client import GitHub, GitHubError
+from harness.ops.costs import UsageRepo
 from harness.playbook.load import builtin_playbooks
 from harness.playbook.models import Node
 from harness.server.app import create_app
@@ -158,6 +160,14 @@ class _DemoRunner(Runner):
 
     only_run: str | None = None
 
+    async def tick(self) -> int:
+        # The seeded runs stay as seeded: a kill switch (or any control request) for them is acknowledged, not applied.
+        self.store.execute(
+            "UPDATE control_requests SET handled_at = ?, result_json = ? WHERE handled_at IS NULL AND run_id IS NOT ?",
+            (self.store.now(), '{"ok": true, "note": "not applied to seeded demo runs"}', self.only_run),
+        )
+        return await super().tick()
+
     def _due_steps(self, now_iso: str) -> list[StepRow]:
         return [s for s in super()._due_steps(now_iso) if s.run_id == self.only_run]
 
@@ -219,6 +229,45 @@ class DemoDriver:
                 await self._task
 
 
+# Scripted health for the Agents screen: one agent per interesting state, whatever the host has installed.
+_DEMO_HEALTH = {
+    "jules": ("ok", "JULES_API_KEY is set"),
+    "claude": ("degraded", "ANTHROPIC_API_KEY is set but claude-agent-sdk is not importable"),
+    "codex": ("down", "CODEX_API_KEY is not set; codex is not on PATH"),
+    "copilot": ("disabled", "not configured"),
+}
+
+
+async def _demo_health(name: str, cfg: Any, env: Any, *, cache: Any = None) -> AgentHealth:
+    status, detail = _DEMO_HEALTH.get(name, ("unknown", "no health check for this agent"))
+    return AgentHealth(
+        name=name,
+        enabled=status != "disabled",
+        status=status,  # type: ignore[arg-type]
+        detail=detail,
+        checked_at="2026-01-01T00:00:00Z",
+    )
+
+
+def _seed_demo_costs(store: Store, seed: Seed) -> None:
+    """Spend for the seeded runs (one estimated), so the Agents screen has a cost table."""
+    usage = UsageRepo(store)
+    usage.add(
+        run_id=seed.run_a, step_id=f"{seed.run_a}/plan/1", source="agent", adapter="jules", cost_usd=1.25
+    )
+    usage.add(
+        run_id=seed.run_a,
+        step_id=f"{seed.run_a}/plan_review/1",
+        source="review",
+        adapter="reviewer",
+        cost_usd=0.4,
+        estimated=True,
+    )
+    usage.add(
+        run_id=seed.run_b, step_id=f"{seed.run_b}/implement/1", source="agent", adapter="jules", cost_usd=3.1
+    )
+
+
 def _demo_router() -> APIRouter:
     router = APIRouter(prefix="/api/demo", tags=["demo"])
 
@@ -264,6 +313,8 @@ def create_demo_app(
         extra_routers=[_demo_router()],
         planner=planner,
     )
+    _seed_demo_costs(store, seed)
+    app.state.health_checker = _demo_health
     app.state.driver = DemoDriver(store, interval_s=interval_s)
     app.state.demo_gh = gh
     app.state.demo_planner_hub = hub

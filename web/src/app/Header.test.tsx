@@ -49,6 +49,7 @@ describe('Header', () => {
   function renderWithHealth(demo: boolean) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const fetchMock = mockApi({
+      'GET /api/ops/status': () => ({ status: 200, json: { halted: null, budget: { limit_usd: null, spent_usd: 0, remaining_usd: null, resets_at: '', exceeded: false, unknown_cost_runs: 0 } } }),
       'GET /api/health': () => ({ status: 200, json: { status: 'ok', version: '0', repo_count: 1, demo } })
     });
     render(

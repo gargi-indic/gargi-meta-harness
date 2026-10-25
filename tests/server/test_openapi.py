@@ -1,6 +1,8 @@
 """OpenAPI document: behind the cookie, with a snapshot of the path list so contract changes are visible (M2.2)."""
 
 EXPECTED_PATHS = [
+    "/api/agents",
+    "/api/agents/costs",
     "/api/agents/enabled",
     "/api/board",
     "/api/campaigns",

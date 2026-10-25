@@ -15,7 +15,16 @@ export function createQueryClient() {
 
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from './client';
-import type { CampaignSummary, CampaignGraph, Board, InboxItem, AgentsEnabled } from './types';
+import type {
+  CampaignSummary,
+  CampaignGraph,
+  Board,
+  InboxItem,
+  AgentsEnabled,
+  OpsStatusOut,
+  AgentOut,
+  AgentRunCostRow,
+} from './types';
 
 export const queryKeys = {
   runs: ["runs"],
@@ -26,8 +35,14 @@ export const queryKeys = {
   graph: (id: string) => ["campaigns", id, "graph"],
   board: (campaign?: string) => ["board", campaign ?? null],
   agents: (repo: string) => ["agents", repo],
-  planner: ["planner"]
+  planner: ["planner"],
+  ops: ["ops", "status"],
+  agentList: ["agents", "list"],
+  agentCosts: ["agents", "costs"],
 };
+
+/** Fallback poll for the ops strip and the Agents screen, in case an SSE event is missed. */
+export const OPS_POLL_MS = 15_000;
 
 export function useInvalidateOnEvents() {
   const queryClient = useQueryClient();
@@ -37,6 +52,8 @@ export function useInvalidateOnEvents() {
       case 'run.updated':
         queryClient.invalidateQueries({ queryKey: queryKeys.runs });
         queryClient.invalidateQueries({ queryKey: ["board"] });
+        queryClient.invalidateQueries({ queryKey: queryKeys.agentList });
+        queryClient.invalidateQueries({ queryKey: queryKeys.agentCosts });
         break;
       case 'step.updated': {
         const data = e.data as { run_id?: string } | null;
@@ -55,6 +72,10 @@ export function useInvalidateOnEvents() {
         queryClient.invalidateQueries({ queryKey: queryKeys.issues });
         queryClient.invalidateQueries({ queryKey: queryKeys.campaigns });
         queryClient.invalidateQueries({ queryKey: ["board"] });
+        break;
+      case 'ops.updated':
+        queryClient.invalidateQueries({ queryKey: queryKeys.ops });
+        queryClient.invalidateQueries({ queryKey: queryKeys.agentList });
         break;
       case 'planner.updated':
         queryClient.invalidateQueries({ queryKey: queryKeys.planner });
@@ -169,5 +190,29 @@ export function useRunActivity(id: string, after: number = 0, limit: number = 20
     queryKey: ['runs', id, 'activity', { after, limit }],
     queryFn: () => apiGet(`/api/runs/${encodeURIComponent(id)}/activity?after=${after}&limit=${limit}`),
     enabled: !!id,
+  });
+}
+
+export function useOpsStatus() {
+  return useQuery<OpsStatusOut>({
+    queryKey: queryKeys.ops,
+    queryFn: () => apiGet('/api/ops/status'),
+    refetchInterval: OPS_POLL_MS,
+  });
+}
+
+export function useAgents() {
+  return useQuery<AgentOut[]>({
+    queryKey: queryKeys.agentList,
+    queryFn: () => apiGet('/api/agents'),
+    refetchInterval: OPS_POLL_MS,
+  });
+}
+
+export function useAgentCosts() {
+  return useQuery<AgentRunCostRow[]>({
+    queryKey: queryKeys.agentCosts,
+    queryFn: () => apiGet('/api/agents/costs'),
+    refetchInterval: OPS_POLL_MS,
   });
 }
